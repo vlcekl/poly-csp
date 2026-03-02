@@ -1,0 +1,5 @@
+kind: cellulose
+dp: 12
+monomer_representation: anhydro
+end_mode: open
+end_caps: {}

@@ -1,0 +1,55 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Project data (you'll recreate/download these)
+/data/
+/checkpoints/
+/logs/
+/outputs/
+/legacy/
+
+# Env / secrets
+.env
+.env.*
+*.secret
+*.key
+
+# Ruff / mypy / other caches
+.mypy_cache/
+.ruff_cache/
+
+# Other
+*.pdf
+*.pdb
+*.sdf

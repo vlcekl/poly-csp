@@ -1,0 +1,43 @@
+name: polycsp
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+
+  # Core scientific stack
+  - numpy>=1.24
+  - scipy>=1.10
+
+  # Chemistry + simulation (best installed via conda-forge)
+  - rdkit>=2023.09
+  - openmm>=8.0
+
+  # Config + schema
+  - pydantic>=2.5
+  - hydra-core>=1.3
+  - omegaconf>=2.3
+
+  # Utilities
+  - typing_extensions>=4.7
+
+  # Dev / test tools
+  - pytest>=7.4
+  - pytest-cov>=4.1
+  - ipython
+
+  # Linters / formatting / typing
+  - ruff>=0.3
+  - black>=23.9
+  - mypy>=1.6
+
+  # (Optional) If you plan to use Jupyter notebooks
+  # - jupyterlab
+
+  - pip
+  - pip:
+      # Install the project in editable mode (run this after env creation if you prefer)
+      # - -e .
+
+      # Optional MM / force field ecosystem (install later if needed)
+      # - openff-toolkit
+      # - openff-units

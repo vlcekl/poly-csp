@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+from rdkit import Chem
+
+from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
+
+
+def test_make_35_dmpc_template_structure() -> None:
+    tpl = make_35_dmpc_template()
+    assert tpl.name == "35dmpc"
+    assert tpl.mol.GetNumAtoms() > 0
+    assert tpl.attach_dummy_idx is not None
+    assert tpl.attach_atom_idx != tpl.attach_dummy_idx
+    assert "tau_link" in tpl.dihedrals
+    assert len(tpl.donors) >= 1
+    assert len(tpl.acceptors) >= 1
+
+
+def test_make_35_dmpc_template_attach_atom_is_carbonyl_c() -> None:
+    tpl = make_35_dmpc_template()
+    atom = tpl.mol.GetAtomWithIdx(tpl.attach_atom_idx)
+    assert atom.GetAtomicNum() == 6
+    has_double_o = False
+    for bond in atom.GetBonds():
+        nbr = bond.GetOtherAtom(atom)
+        if nbr.GetAtomicNum() == 8 and bond.GetBondType() == Chem.BondType.DOUBLE:
+            has_double_o = True
+    assert has_double_o

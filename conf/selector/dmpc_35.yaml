@@ -1,0 +1,7 @@
+enabled: false
+name: 35dmpc
+sites: [C6]
+pose:
+  dihedral_targets_deg: {}
+  carbonyl_dir_local: null
+  aromatic_normal_local: null

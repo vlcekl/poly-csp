@@ -1,0 +1,32 @@
+defaults:
+  - helix: admcp_chiralpak_ad
+  - polymer: amylose
+  - selector: dmpc_35
+  - relax: restrained
+  - _self_
+
+output:
+  dir: outputs
+  export_formats: [pdb]
+
+polymer:
+  kind: amylose
+  dp: 12
+  monomer_representation: anhydro
+  end_mode: open
+  end_caps: {}
+
+amber:
+  enabled: false
+  dir: amber
+  charge_model: bcc
+  parameter_backend: placeholder
+
+selector:
+  enabled: false
+  name: 35dmpc
+  sites: [C6]
+  pose:
+    dihedral_targets_deg: {}
+    carbonyl_dir_local: null
+    aromatic_normal_local: null
