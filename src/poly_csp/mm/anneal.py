@@ -16,10 +16,14 @@ def run_temperature_ramp(
     total_steps = max(0, int(n_steps))
     if total_steps == 0:
         return
-    steps_per_segment = max(1, total_steps // segments)
+    base = total_steps // segments
+    remainder = total_steps % segments
 
     for seg in range(segments):
+        steps = base + (1 if seg < remainder else 0)
+        if steps <= 0:
+            continue
         frac = float(seg) / float(max(1, segments - 1))
         t = float(t_start_K + (t_end_K - t_start_K) * frac)
         integrator.setTemperature(t * unit.kelvin)
-        integrator.step(steps_per_segment)
+        integrator.step(int(steps))

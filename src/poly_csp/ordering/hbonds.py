@@ -11,10 +11,13 @@ from poly_csp.chemistry.selectors import SelectorTemplate
 
 @dataclass(frozen=True)
 class HbondMetrics:
-    satisfied_pairs: int
+    like_satisfied_pairs: int
+    geometric_satisfied_pairs: int
     total_pairs: int
-    fraction: float
-    mean_pair_distance_A: float
+    like_fraction: float
+    geometric_fraction: float
+    mean_like_distance_A: float
+    mean_geometric_distance_A: float
 
 
 def _selector_atom_records(
@@ -33,28 +36,65 @@ def _selector_atom_records(
     return out
 
 
+def _normalize(v: np.ndarray) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    if n < 1e-12:
+        return np.zeros((3,), dtype=float)
+    return v / n
+
+
+def _angle_deg(u: np.ndarray, v: np.ndarray) -> float:
+    uu = _normalize(u)
+    vv = _normalize(v)
+    if float(np.linalg.norm(uu)) < 1e-12 or float(np.linalg.norm(vv)) < 1e-12:
+        return 0.0
+    cosang = float(np.clip(np.dot(uu, vv), -1.0, 1.0))
+    return float(np.rad2deg(np.arccos(cosang)))
+
+
+def _first_heavy_neighbor_except(
+    mol: Chem.Mol,
+    atom_idx: int,
+    excluded: set[int],
+) -> int | None:
+    atom = mol.GetAtomWithIdx(int(atom_idx))
+    for nbr in atom.GetNeighbors():
+        idx = int(nbr.GetIdx())
+        if idx in excluded:
+            continue
+        if nbr.GetAtomicNum() <= 1:
+            continue
+        return idx
+    return None
+
+
 def compute_hbond_metrics(
     mol: Chem.Mol,
     selector: SelectorTemplate,
     max_distance_A: float = 3.3,
     neighbor_window: int = 1,
+    min_donor_angle_deg: float = 100.0,
+    min_acceptor_angle_deg: float = 90.0,
 ) -> HbondMetrics:
     """
-    Lightweight pre-organization metric:
-    donor N (selector donor atoms) to carbonyl O acceptors within residue-neighbor window.
+    Pre-organization metrics for selector donor/acceptor pairs:
+    - hbond-like: distance threshold only
+    - hbond-geometric: distance + donor/acceptor proxy angle thresholds
     """
     if mol.GetNumConformers() == 0:
-        return HbondMetrics(0, 0, 0.0, 0.0)
+        return HbondMetrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0)
 
     donors = _selector_atom_records(mol, selector.donors)
     acceptors = _selector_atom_records(mol, selector.acceptors)
     if not donors or not acceptors:
-        return HbondMetrics(0, 0, 0.0, 0.0)
+        return HbondMetrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0)
 
     xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
     total = 0
-    satisfied = 0
-    sat_distances: List[float] = []
+    satisfied_like = 0
+    satisfied_geom = 0
+    like_distances: List[float] = []
+    geom_distances: List[float] = []
 
     for d_res, d_idx in donors:
         for a_res, a_idx in acceptors:
@@ -64,15 +104,50 @@ def compute_hbond_metrics(
                 continue
             total += 1
             dist = float(np.linalg.norm(xyz[d_idx] - xyz[a_idx]))
-            if dist <= float(max_distance_A):
-                satisfied += 1
-                sat_distances.append(dist)
+            if dist > float(max_distance_A):
+                continue
 
-    fraction = float(satisfied / total) if total > 0 else 0.0
-    mean_dist = float(np.mean(sat_distances)) if sat_distances else 0.0
+            satisfied_like += 1
+            like_distances.append(dist)
+
+            d_proxy = _first_heavy_neighbor_except(
+                mol=mol,
+                atom_idx=d_idx,
+                excluded={a_idx},
+            )
+            a_proxy = _first_heavy_neighbor_except(
+                mol=mol,
+                atom_idx=a_idx,
+                excluded={d_idx},
+            )
+            if d_proxy is None or a_proxy is None:
+                continue
+
+            donor_angle = _angle_deg(
+                xyz[d_idx] - xyz[d_proxy],
+                xyz[a_idx] - xyz[d_idx],
+            )
+            acceptor_angle = _angle_deg(
+                xyz[d_idx] - xyz[a_idx],
+                xyz[a_proxy] - xyz[a_idx],
+            )
+            if (
+                donor_angle >= float(min_donor_angle_deg)
+                and acceptor_angle >= float(min_acceptor_angle_deg)
+            ):
+                satisfied_geom += 1
+                geom_distances.append(dist)
+
+    like_fraction = float(satisfied_like / total) if total > 0 else 0.0
+    geometric_fraction = float(satisfied_geom / total) if total > 0 else 0.0
     return HbondMetrics(
-        satisfied_pairs=satisfied,
+        like_satisfied_pairs=satisfied_like,
+        geometric_satisfied_pairs=satisfied_geom,
         total_pairs=total,
-        fraction=fraction,
-        mean_pair_distance_A=mean_dist,
+        like_fraction=like_fraction,
+        geometric_fraction=geometric_fraction,
+        mean_like_distance_A=float(np.mean(like_distances)) if like_distances else 0.0,
+        mean_geometric_distance_A=float(np.mean(geom_distances))
+        if geom_distances
+        else 0.0,
     )

@@ -2,7 +2,13 @@ enabled: false
 repeat_residues: 1
 max_distance_A: 3.3
 neighbor_window: 1
-clash_target_A: 1.1
+min_donor_angle_deg: 100.0
+min_acceptor_angle_deg: 90.0
+exclude_13: true
+exclude_14: false
+min_backbone_backbone_distance_A: 1.05
+min_backbone_selector_distance_A: 1.0
+min_selector_selector_distance_A: 1.0
 hbond_weight: 8.0
 clash_weight: 10.0
 max_candidates: 64

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
@@ -122,6 +123,80 @@ def screw_symmetry_rmsd(
 
     diff = res0 - resk_mapped
     return float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+
+
+_BACKBONE_SYMMETRY_LABELS = (
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "O5",
+    "O2",
+    "O3",
+    "O4",
+    "O6",
+    "O1",
+)
+
+
+def _residue_label_maps(mol: Chem.Mol) -> list[dict[str, int]]:
+    if not mol.HasProp("_poly_csp_residue_label_map_json"):
+        raise ValueError("Missing _poly_csp_residue_label_map_json metadata on molecule.")
+    payload = json.loads(mol.GetProp("_poly_csp_residue_label_map_json"))
+    if not isinstance(payload, list):
+        raise ValueError("Invalid residue label map metadata format.")
+    maps: list[dict[str, int]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid residue label map entry.")
+        maps.append({str(k): int(v) for k, v in item.items()})
+    return maps
+
+
+def screw_symmetry_rmsd_from_mol(
+    mol: Chem.Mol,
+    helix: HelixSpec,
+    k: int | None = None,
+) -> float:
+    """
+    Evaluate screw symmetry on the final molecule coordinates.
+    Uses residue label maps and compares only shared backbone labels.
+    """
+    if mol.GetNumConformers() == 0:
+        return 0.0
+
+    maps = _residue_label_maps(mol)
+    dp = len(maps)
+    step = int(k if k is not None else (helix.repeat_residues or 1))
+    if step <= 0 or dp <= step:
+        return 0.0
+
+    xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
+    inv = ScrewTransform(theta_rad=-helix.theta_rad, rise_A=-helix.rise_A)
+
+    sum_sq = 0.0
+    count = 0
+    for i in range(dp - step):
+        left = maps[i]
+        right = maps[i + step]
+        shared = [label for label in _BACKBONE_SYMMETRY_LABELS if label in left and label in right]
+        if not shared:
+            continue
+        left_idx = np.asarray([left[label] for label in shared], dtype=int)
+        right_idx = np.asarray([right[label] for label in shared], dtype=int)
+
+        left_xyz = xyz[left_idx]
+        right_xyz = xyz[right_idx]
+        right_mapped = inv.apply(right_xyz, step)
+
+        diff = left_xyz - right_mapped
+        sum_sq += float(np.sum(diff * diff))
+        count += int(diff.shape[0])
+
+    if count == 0:
+        return 0.0
+    return float(np.sqrt(sum_sq / float(count)))
 
 
 def selector_torsion_stats(

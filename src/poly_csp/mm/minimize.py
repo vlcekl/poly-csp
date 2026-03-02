@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, Literal
 
 import numpy as np
 from rdkit import Chem
@@ -27,6 +27,9 @@ class RelaxSpec:
     positional_k: float
     dihedral_k: float
     hbond_k: float
+    mode: Literal["geometry_pre_relax", "ambertools_parameterized"] = (
+        "geometry_pre_relax"
+    )
     n_stages: int = 3
     max_iterations: int = 200
     anneal_enabled: bool = False
@@ -95,7 +98,6 @@ def _hbond_pairs(
     if mol.GetNumConformers() == 0:
         return []
     xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
-    mappings = _selector_mappings(mol)
     donors: list[tuple[int, int]] = []
     acceptors: list[tuple[int, int]] = []
     for atom in mol.GetAtoms():
@@ -135,10 +137,39 @@ def run_staged_relaxation(
     mol: Chem.Mol,
     spec: RelaxSpec,
     selector: SelectorTemplate | None = None,
+    amber_artifacts: Dict[str, object] | None = None,
 ) -> tuple[Chem.Mol, Dict[str, object]]:
     if not spec.enabled:
         return Chem.Mol(mol), {"enabled": False}
 
+    if spec.mode == "geometry_pre_relax":
+        return _run_geometry_pre_relax(mol=mol, spec=spec, selector=selector)
+    if spec.mode == "ambertools_parameterized":
+        if amber_artifacts is None:
+            raise RuntimeError(
+                "ambertools_parameterized relaxation requires Amber artifact metadata."
+            )
+        from poly_csp.mm.parameterized_relax import run_parameterized_relaxation
+
+        return run_parameterized_relaxation(
+            mol=mol,
+            amber_summary=amber_artifacts,
+            positional_k=float(spec.positional_k),
+            n_stages=int(spec.n_stages),
+            max_iterations=int(spec.max_iterations),
+            anneal_enabled=bool(spec.anneal_enabled),
+            t_start_K=float(spec.t_start_K),
+            t_end_K=float(spec.t_end_K),
+            anneal_steps=int(spec.anneal_steps),
+        )
+    raise ValueError(f"Unsupported relaxation mode {spec.mode!r}")
+
+
+def _run_geometry_pre_relax(
+    mol: Chem.Mol,
+    spec: RelaxSpec,
+    selector: SelectorTemplate | None = None,
+) -> tuple[Chem.Mol, Dict[str, object]]:
     built = build_relaxation_system(mol)
     system = built.system
     positions_nm = built.positions_nm
@@ -208,6 +239,7 @@ def run_staged_relaxation(
     out = _update_rdkit_coords(mol, final_positions)
     summary: Dict[str, object] = {
         "enabled": True,
+        "force_model": "geometric_pre_relax",
         "n_stages": int(spec.n_stages),
         "stage_energies_kj_mol": stage_energies,
         "anneal_enabled": bool(spec.anneal_enabled),

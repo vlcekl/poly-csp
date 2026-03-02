@@ -84,16 +84,18 @@ poly_csp/
 │   ├── helix/
 │   ├── polymer/
 │   ├── selector/
-│   └── relax/
+│   ├── ordering/
+│   ├── relax/
+│   └── qc/
 │
 └── src/
     └── poly_csp/
+        ├── __init__.py
         ├── config/
         │   ├── schema.py
         │   └── presets.py
         │
         ├── geometry/
-        │   ├── helix.py
         │   ├── transform.py
         │   ├── local_frames.py
         │   └── dihedrals.py
@@ -102,10 +104,12 @@ poly_csp/
         │   ├── monomers.py
         │   ├── backbone_build.py
         │   ├── polymerize.py
+        │   ├── terminals.py
         │   ├── selectors.py
         │   └── functionalization.py
         │
         ├── ordering/
+        │   ├── rotamers.py
         │   ├── scoring.py
         │   ├── hbonds.py
         │   └── symmetry_opt.py
@@ -113,6 +117,7 @@ poly_csp/
         ├── mm/
         │   ├── openmm_system.py
         │   ├── restraints.py
+        │   ├── anneal.py
         │   └── minimize.py
         │
         ├── pipelines/
@@ -120,8 +125,13 @@ poly_csp/
         │
         └── io/
             ├── rdkit_io.py
+            ├── amber.py
             └── pdb.py
 ```
+
+Runtime source of truth:
+- Build-time defaults and behavior are controlled by Hydra YAML in `conf/`.
+- `src/poly_csp/config/presets.py` is reference/experimental and not the active runtime default path.
 
 ---
 
@@ -281,6 +291,23 @@ Each build produces:
 
 ---
 
+# Model Validity
+
+The project supports two distinct relaxation models:
+
+1. `geometry_pre_relax` (default):
+   - Soft-repulsion + restraint guided coordinate cleanup.
+   - Useful for deterministic pre-organization and clash reduction.
+   - Not a full physical force-field model.
+
+2. `ambertools_parameterized`:
+   - Uses AmberTools-generated `prmtop/inpcrd` artifacts for parameterized OpenMM minimization.
+   - Intended for physically grounded relaxation workflows.
+
+Use the mode explicitly via `relax.mode=...` and interpret outputs accordingly.
+
+---
+
 # Quality Control Philosophy
 
 Each build should satisfy:
@@ -359,6 +386,4 @@ Used in chiral chromatography systems such as Chiralpak AD.
 
 # Status
 
-Early-stage deterministic geometry engine.
-
-Helix builder and selector attachment are the first milestones.
+Deterministic construction workflow with selector attachment, ordering, QC, and two relaxation modes (geometric pre-relax and AmberTools-parameterized).

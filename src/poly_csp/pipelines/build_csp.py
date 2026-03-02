@@ -42,7 +42,7 @@ from poly_csp.ordering.scoring import (
     bonded_exclusion_pairs,
     min_distance_by_class,
     min_interatomic_distance,
-    screw_symmetry_rmsd,
+    screw_symmetry_rmsd_from_mol,
     selector_torsion_stats,
 )
 from poly_csp.ordering.symmetry_opt import OrderingSpec, optimize_selector_ordering
@@ -54,18 +54,22 @@ try:
         apply_selector_pose_dihedrals,
         attach_selector,
     )
-except Exception:  # noqa: BLE001
+except (ImportError, ModuleNotFoundError):
     SelectorRegistry = None  # type: ignore
     SelectorTemplate = None  # type: ignore
     apply_selector_pose_dihedrals = None  # type: ignore
     attach_selector = None  # type: ignore
+except Exception as exc:  # noqa: BLE001
+    raise RuntimeError("Unexpected error while importing selector modules.") from exc
 
 # Optional MM imports (keep baseline path runnable if OpenMM is unavailable).
 try:
     from poly_csp.mm.minimize import RelaxSpec, run_staged_relaxation
-except Exception:  # noqa: BLE001
+except (ImportError, ModuleNotFoundError):
     RelaxSpec = None  # type: ignore
     run_staged_relaxation = None  # type: ignore
+except Exception as exc:  # noqa: BLE001
+    raise RuntimeError("Unexpected error while importing OpenMM modules.") from exc
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,8 @@ class QcSpec:
     min_backbone_selector_distance_A: float = 1.0
     min_selector_selector_distance_A: float = 1.0
     max_screw_symmetry_rmsd_A: float = 0.50
-    min_hbond_fraction: float = 0.0
+    min_hbond_like_fraction: float = 0.0
+    min_hbond_geometric_fraction: float = 0.0
     max_selector_torsion_std_deg: Optional[float] = None
     fail_on_thresholds: bool = False
 
@@ -102,11 +107,15 @@ class BuildReport:
     ordering_enabled: bool
     ordering_summary: dict[str, object]
     relax_enabled: bool
+    relax_mode: str
     relax_summary: dict[str, object]
     qc_min_heavy_distance_A: float
     qc_class_min_distance_A: dict[str, Optional[float]]
     qc_screw_symmetry_rmsd_A: float
-    qc_hbond_fraction: float
+    qc_hbond_like_fraction: float
+    qc_hbond_geometric_fraction: float
+    qc_hbond_like_satisfied_pairs: int
+    qc_hbond_geometric_satisfied_pairs: int
     qc_hbond_total_pairs: int
     qc_selector_torsion_stats_deg: dict[str, dict[str, float]]
     qc_thresholds: dict[str, object]
@@ -157,6 +166,7 @@ def _cfg_to_relax_spec(cfg: DictConfig):
         ),
         dihedral_k=float(relax_cfg.dihedral_k if "dihedral_k" in relax_cfg else 500.0),
         hbond_k=float(relax_cfg.hbond_k if "hbond_k" in relax_cfg else 50.0),
+        mode=str(relax_cfg.mode if "mode" in relax_cfg else "geometry_pre_relax"),
         n_stages=int(relax_cfg.n_stages if "n_stages" in relax_cfg else 3),
         max_iterations=int(
             relax_cfg.max_iterations if "max_iterations" in relax_cfg else 200
@@ -197,8 +207,15 @@ def _cfg_to_qc_spec(cfg: DictConfig) -> QcSpec:
             if "max_screw_symmetry_rmsd_A" in qc_cfg
             else 0.50
         ),
-        min_hbond_fraction=float(
-            qc_cfg.min_hbond_fraction if "min_hbond_fraction" in qc_cfg else 0.0
+        min_hbond_like_fraction=float(
+            qc_cfg.min_hbond_like_fraction
+            if "min_hbond_like_fraction" in qc_cfg
+            else 0.0
+        ),
+        min_hbond_geometric_fraction=float(
+            qc_cfg.min_hbond_geometric_fraction
+            if "min_hbond_geometric_fraction" in qc_cfg
+            else 0.0
         ),
         max_selector_torsion_std_deg=(
             float(qc_cfg.max_selector_torsion_std_deg)
@@ -268,6 +285,27 @@ def main(cfg: DictConfig) -> None:
     if amber_cfg_enabled and "amber" not in output_export_formats:
         output_export_formats.append("amber")
 
+    amber_dir = (
+        str(cfg.amber.dir)
+        if "amber" in cfg and cfg.amber is not None and "dir" in cfg.amber
+        else "amber"
+    )
+    amber_charge_model = (
+        str(cfg.amber.charge_model)
+        if "amber" in cfg and cfg.amber is not None and "charge_model" in cfg.amber
+        else "bcc"
+    )
+    amber_parameter_backend = (
+        str(cfg.amber.parameter_backend)
+        if "amber" in cfg and cfg.amber is not None and "parameter_backend" in cfg.amber
+        else "placeholder"
+    )
+    amber_net_charge = (
+        cfg.amber.net_charge
+        if "amber" in cfg and cfg.amber is not None and "net_charge" in cfg.amber
+        else "auto"
+    )
+
     unsupported_formats = [
         fmt for fmt in output_export_formats if fmt not in {"pdb", "amber"}
     ]
@@ -297,6 +335,24 @@ def main(cfg: DictConfig) -> None:
         raise RuntimeError(
             "Relaxation requested but OpenMM modules are unavailable in this environment."
         )
+    relax_mode = (
+        str(relax_spec.mode)
+        if (relax_spec is not None and bool(relax_spec.enabled))
+        else "geometry_pre_relax"
+    )
+
+    if relax_mode == "ambertools_parameterized":
+        if not amber_cfg_enabled:
+            raise RuntimeError(
+                "relax.mode=ambertools_parameterized requires amber.enabled=true."
+            )
+        if amber_parameter_backend.strip().lower() != "ambertools":
+            raise RuntimeError(
+                "relax.mode=ambertools_parameterized requires "
+                "amber.parameter_backend=ambertools."
+            )
+        if "amber" not in output_export_formats:
+            output_export_formats.append("amber")
 
     outdir = _ensure_outdir(
         cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs"
@@ -390,6 +446,19 @@ def main(cfg: DictConfig) -> None:
             )
             ordering_applied = True
 
+    amber_summary: dict[str, object] = {"enabled": False}
+    amber_export_done = False
+    if relax_mode == "ambertools_parameterized":
+        amber_summary = export_amber_artifacts(
+            mol=mol_poly,
+            outdir=outdir / amber_dir,
+            model_name="model",
+            charge_model=amber_charge_model,
+            parameter_backend=amber_parameter_backend,
+            net_charge=amber_net_charge,
+        )
+        amber_export_done = True
+
     # ---- Stage 5: optional restrained relaxation.
     relax_summary: dict[str, object] = {"enabled": False}
     relax_enabled = False
@@ -402,6 +471,7 @@ def main(cfg: DictConfig) -> None:
             mol=mol_poly,
             spec=relax_spec,
             selector=selector,
+            amber_artifacts=amber_summary if relax_mode == "ambertools_parameterized" else None,
         )
         relax_enabled = True
 
@@ -420,18 +490,13 @@ def main(cfg: DictConfig) -> None:
     qc_class_dist_raw = min_distance_by_class(mol_poly, xyz, heavy_mask, excluded_pairs)
     qc_class_dist = {k: _finite_or_none(v) for k, v in qc_class_dist_raw.items()}
 
-    n_atoms_per_res = template.mol.GetNumAtoms()
     k = int(helix.repeat_residues) if helix.repeat_residues else 1
-    qc_sym_rmsd = float(
-        screw_symmetry_rmsd(
-            coords,
-            residue_atom_count=n_atoms_per_res,
-            helix=helix,
-            k=k,
-        )
-    )
+    qc_sym_rmsd = float(screw_symmetry_rmsd_from_mol(mol_poly, helix=helix, k=k))
 
-    qc_hbond_fraction = 0.0
+    qc_hbond_like_fraction = 0.0
+    qc_hbond_geometric_fraction = 0.0
+    qc_hbond_like_satisfied_pairs = 0
+    qc_hbond_geometric_satisfied_pairs = 0
     qc_hbond_total_pairs = 0
     qc_selector_torsions: dict[str, dict[str, float]] = {}
     if selector is not None:
@@ -440,8 +505,13 @@ def main(cfg: DictConfig) -> None:
             selector=selector,
             max_distance_A=ordering_spec.max_distance_A,
             neighbor_window=ordering_spec.neighbor_window,
+            min_donor_angle_deg=ordering_spec.min_donor_angle_deg,
+            min_acceptor_angle_deg=ordering_spec.min_acceptor_angle_deg,
         )
-        qc_hbond_fraction = float(hb.fraction)
+        qc_hbond_like_fraction = float(hb.like_fraction)
+        qc_hbond_geometric_fraction = float(hb.geometric_fraction)
+        qc_hbond_like_satisfied_pairs = int(hb.like_satisfied_pairs)
+        qc_hbond_geometric_satisfied_pairs = int(hb.geometric_satisfied_pairs)
         qc_hbond_total_pairs = int(hb.total_pairs)
         qc_selector_torsions = selector_torsion_stats(
             mol=mol_poly,
@@ -461,7 +531,8 @@ def main(cfg: DictConfig) -> None:
             qc_spec.min_selector_selector_distance_A
         ),
         "max_screw_symmetry_rmsd_A": float(qc_spec.max_screw_symmetry_rmsd_A),
-        "min_hbond_fraction": float(qc_spec.min_hbond_fraction),
+        "min_hbond_like_fraction": float(qc_spec.min_hbond_like_fraction),
+        "min_hbond_geometric_fraction": float(qc_spec.min_hbond_geometric_fraction),
         "max_selector_torsion_std_deg": qc_spec.max_selector_torsion_std_deg,
         "exclude_13": bool(qc_spec.exclude_13),
         "exclude_14": bool(qc_spec.exclude_14),
@@ -495,9 +566,22 @@ def main(cfg: DictConfig) -> None:
             qc_fail_reasons.append(
                 f"screw_symmetry_rmsd_A={qc_sym_rmsd:.3f} > {qc_spec.max_screw_symmetry_rmsd_A:.3f}"
             )
-        if selector is not None and qc_hbond_fraction < qc_spec.min_hbond_fraction:
+        if (
+            selector is not None
+            and qc_hbond_like_fraction < qc_spec.min_hbond_like_fraction
+        ):
             qc_fail_reasons.append(
-                f"hbond_fraction={qc_hbond_fraction:.3f} < {qc_spec.min_hbond_fraction:.3f}"
+                "hbond_like_fraction="
+                f"{qc_hbond_like_fraction:.3f} < {qc_spec.min_hbond_like_fraction:.3f}"
+            )
+        if (
+            selector is not None
+            and qc_hbond_geometric_fraction < qc_spec.min_hbond_geometric_fraction
+        ):
+            qc_fail_reasons.append(
+                "hbond_geometric_fraction="
+                f"{qc_hbond_geometric_fraction:.3f} < "
+                f"{qc_spec.min_hbond_geometric_fraction:.3f}"
             )
         if qc_spec.max_selector_torsion_std_deg is not None:
             for torsion_name, stats in qc_selector_torsions.items():
@@ -510,34 +594,9 @@ def main(cfg: DictConfig) -> None:
 
     qc_pass = len(qc_fail_reasons) == 0
 
-    # ---- Stage 8: optional AMBER scaffold export.
-    amber_enabled = "amber" in output_export_formats
-    amber_summary: dict[str, object] = {"enabled": False}
-    if amber_enabled:
-        amber_dir = (
-            str(cfg.amber.dir)
-            if "amber" in cfg and cfg.amber is not None and "dir" in cfg.amber
-            else "amber"
-        )
-        amber_charge_model = (
-            str(cfg.amber.charge_model)
-            if "amber" in cfg
-            and cfg.amber is not None
-            and "charge_model" in cfg.amber
-            else "bcc"
-        )
-        amber_parameter_backend = (
-            str(cfg.amber.parameter_backend)
-            if "amber" in cfg
-            and cfg.amber is not None
-            and "parameter_backend" in cfg.amber
-            else "placeholder"
-        )
-        amber_net_charge = (
-            cfg.amber.net_charge
-            if "amber" in cfg and cfg.amber is not None and "net_charge" in cfg.amber
-            else "auto"
-        )
+    # ---- Stage 8: optional AMBER export (or already exported for parameterized relaxation).
+    amber_enabled = "amber" in output_export_formats or amber_export_done
+    if amber_enabled and not amber_export_done:
         amber_summary = export_amber_artifacts(
             mol=mol_poly,
             outdir=outdir / amber_dir,
@@ -546,6 +605,7 @@ def main(cfg: DictConfig) -> None:
             parameter_backend=amber_parameter_backend,
             net_charge=amber_net_charge,
         )
+        amber_export_done = True
 
     report = BuildReport(
         polymer=str(backbone.polymer),
@@ -565,11 +625,15 @@ def main(cfg: DictConfig) -> None:
         ordering_enabled=bool(ordering_applied),
         ordering_summary=ordering_summary,
         relax_enabled=bool(relax_enabled),
+        relax_mode=relax_mode,
         relax_summary=relax_summary,
         qc_min_heavy_distance_A=qc_min_dist,
         qc_class_min_distance_A=qc_class_dist,
         qc_screw_symmetry_rmsd_A=qc_sym_rmsd,
-        qc_hbond_fraction=qc_hbond_fraction,
+        qc_hbond_like_fraction=qc_hbond_like_fraction,
+        qc_hbond_geometric_fraction=qc_hbond_geometric_fraction,
+        qc_hbond_like_satisfied_pairs=qc_hbond_like_satisfied_pairs,
+        qc_hbond_geometric_satisfied_pairs=qc_hbond_geometric_satisfied_pairs,
         qc_hbond_total_pairs=qc_hbond_total_pairs,
         qc_selector_torsion_stats_deg=qc_selector_torsions,
         qc_thresholds=qc_thresholds,
@@ -601,7 +665,8 @@ def main(cfg: DictConfig) -> None:
     print(f"  pass:                         {qc_pass}")
     print(f"  min heavy-atom distance (A):  {qc_min_dist:.3f}")
     print(f"  screw symmetry RMSD (A):      {qc_sym_rmsd:.3f}")
-    print(f"  hbond fraction:               {qc_hbond_fraction:.3f}")
+    print(f"  hbond-like fraction:          {qc_hbond_like_fraction:.3f}")
+    print(f"  hbond-geometric fraction:     {qc_hbond_geometric_fraction:.3f}")
     if qc_fail_reasons:
         print("  failures:")
         for reason in qc_fail_reasons:

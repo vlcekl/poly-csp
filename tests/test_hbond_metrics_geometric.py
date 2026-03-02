@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+import numpy as np
+from rdkit import Chem
+from rdkit.Geometry import Point3D
+
+from poly_csp.chemistry.selectors import SelectorTemplate
+from poly_csp.ordering.hbonds import compute_hbond_metrics
+
+
+def _selector_test_mol() -> Chem.Mol:
+    rw = Chem.RWMol()
+    n_idx = rw.AddAtom(Chem.Atom(7))
+    c_donor_idx = rw.AddAtom(Chem.Atom(6))
+    o_idx = rw.AddAtom(Chem.Atom(8))
+    c_acceptor_idx = rw.AddAtom(Chem.Atom(6))
+    rw.AddBond(n_idx, c_donor_idx, Chem.BondType.SINGLE)
+    rw.AddBond(o_idx, c_acceptor_idx, Chem.BondType.SINGLE)
+    mol = rw.GetMol()
+    Chem.SanitizeMol(mol)
+    return mol
+
+
+def _annotate_selector_atoms(mol: Chem.Mol) -> Chem.Mol:
+    out = Chem.Mol(mol)
+    for atom in out.GetAtoms():
+        atom.SetIntProp("_poly_csp_selector_instance", 1)
+        atom.SetIntProp("_poly_csp_residue_index", 0)
+        atom.SetProp("_poly_csp_site", "C6")
+        atom.SetIntProp("_poly_csp_selector_local_idx", int(atom.GetIdx()))
+    return out
+
+
+def _set_coords(mol: Chem.Mol, coords: np.ndarray) -> Chem.Mol:
+    out = Chem.Mol(mol)
+    conf = Chem.Conformer(out.GetNumAtoms())
+    for i, (x, y, z) in enumerate(coords):
+        conf.SetAtomPosition(i, Point3D(float(x), float(y), float(z)))
+    out.RemoveAllConformers()
+    out.AddConformer(conf, assignId=True)
+    return out
+
+
+def _selector_template() -> SelectorTemplate:
+    mol = _selector_test_mol()
+    return SelectorTemplate(
+        name="test_selector",
+        mol=mol,
+        attach_atom_idx=1,
+        dihedrals={},
+        donors=(0,),
+        acceptors=(2,),
+    )
+
+
+def test_hbond_metrics_distance_pass_geometric_fail() -> None:
+    selector = _selector_template()
+    mol = _annotate_selector_atoms(selector.mol)
+    coords = np.array(
+        [
+            [0.0, 0.0, 0.0],  # donor N
+            [1.0, 0.0, 0.0],  # donor proxy C -> donor angle ~90
+            [0.0, 0.0, 2.8],  # acceptor O (within distance threshold)
+            [1.0, 0.0, 2.8],  # acceptor proxy C -> acceptor angle ~90
+        ],
+        dtype=float,
+    )
+    mol = _set_coords(mol, coords)
+
+    metrics = compute_hbond_metrics(
+        mol=mol,
+        selector=selector,
+        max_distance_A=3.2,
+        min_donor_angle_deg=110.0,
+        min_acceptor_angle_deg=120.0,
+    )
+    assert metrics.total_pairs == 1
+    assert metrics.like_satisfied_pairs == 1
+    assert metrics.geometric_satisfied_pairs == 0
+    assert metrics.like_fraction == 1.0
+    assert metrics.geometric_fraction == 0.0
+
+
+def test_hbond_metrics_geometric_pass() -> None:
+    selector = _selector_template()
+    mol = _annotate_selector_atoms(selector.mol)
+    coords = np.array(
+        [
+            [0.0, 0.0, 0.0],   # donor N
+            [0.0, 0.0, 1.0],   # donor proxy C -> donor angle 180
+            [0.0, 0.0, 2.8],   # acceptor O
+            [0.0, 0.0, 3.8],   # acceptor proxy C -> acceptor angle 180
+        ],
+        dtype=float,
+    )
+    mol = _set_coords(mol, coords)
+
+    metrics = compute_hbond_metrics(
+        mol=mol,
+        selector=selector,
+        max_distance_A=3.2,
+        min_donor_angle_deg=100.0,
+        min_acceptor_angle_deg=90.0,
+    )
+    assert metrics.total_pairs == 1
+    assert metrics.like_satisfied_pairs == 1
+    assert metrics.geometric_satisfied_pairs == 1
+    assert metrics.like_fraction == 1.0
+    assert metrics.geometric_fraction == 1.0
+
+
+def test_hbond_metrics_no_conformer_returns_zeroes() -> None:
+    selector = _selector_template()
+    mol = _annotate_selector_atoms(selector.mol)
+    mol.RemoveAllConformers()
+    metrics = compute_hbond_metrics(mol=mol, selector=selector)
+    assert metrics.total_pairs == 0
+    assert metrics.like_satisfied_pairs == 0
+    assert metrics.geometric_satisfied_pairs == 0
+    assert metrics.like_fraction == 0.0
+    assert metrics.geometric_fraction == 0.0

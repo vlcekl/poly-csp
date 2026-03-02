@@ -15,7 +15,11 @@ from poly_csp.ordering.rotamers import (
     default_rotamer_grid,
     enumerate_pose_library,
 )
-from poly_csp.ordering.scoring import min_interatomic_distance
+from poly_csp.ordering.scoring import (
+    bonded_exclusion_pairs,
+    min_distance_by_class,
+    min_interatomic_distance,
+)
 
 
 @dataclass(frozen=True)
@@ -24,7 +28,13 @@ class OrderingSpec:
     repeat_residues: int = 1
     max_distance_A: float = 3.3
     neighbor_window: int = 1
-    clash_target_A: float = 1.1
+    min_donor_angle_deg: float = 100.0
+    min_acceptor_angle_deg: float = 90.0
+    exclude_13: bool = True
+    exclude_14: bool = False
+    min_backbone_backbone_distance_A: float = 1.05
+    min_backbone_selector_distance_A: float = 1.0
+    min_selector_selector_distance_A: float = 1.0
     hbond_weight: float = 8.0
     clash_weight: float = 10.0
     max_candidates: int = 64
@@ -37,22 +47,45 @@ def _heavy_mask(mol: Chem.Mol) -> np.ndarray:
     return mask
 
 
+def _finite_or_none(value: float) -> float | None:
+    return float(value) if np.isfinite(value) else None
+
+
 def _objective(
     mol: Chem.Mol,
     selector: SelectorTemplate,
     spec: OrderingSpec,
-) -> tuple[float, HbondMetrics, float]:
+) -> tuple[float, HbondMetrics, float, dict[str, float]]:
     hb = compute_hbond_metrics(
         mol=mol,
         selector=selector,
         max_distance_A=spec.max_distance_A,
         neighbor_window=spec.neighbor_window,
+        min_donor_angle_deg=spec.min_donor_angle_deg,
+        min_acceptor_angle_deg=spec.min_acceptor_angle_deg,
     )
     xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
-    dmin = float(min_interatomic_distance(xyz, _heavy_mask(mol)))
-    clash_penalty = max(0.0, float(spec.clash_target_A) - dmin)
-    score = float(spec.hbond_weight) * hb.fraction - float(spec.clash_weight) * clash_penalty
-    return score, hb, dmin
+    max_path_length = 1 + int(spec.exclude_13) + int(spec.exclude_14)
+    excluded = bonded_exclusion_pairs(mol, max_path_length=max_path_length)
+    heavy_mask = _heavy_mask(mol)
+    dmin = float(min_interatomic_distance(xyz, heavy_mask, excluded))
+    class_min = min_distance_by_class(mol, xyz, heavy_mask, excluded)
+
+    bb = class_min["backbone_backbone"]
+    bs = class_min["backbone_selector"]
+    ss = class_min["selector_selector"]
+    deficit = 0.0
+    if np.isfinite(bb):
+        deficit += max(0.0, float(spec.min_backbone_backbone_distance_A) - float(bb))
+    if np.isfinite(bs):
+        deficit += max(0.0, float(spec.min_backbone_selector_distance_A) - float(bs))
+    if np.isfinite(ss):
+        deficit += max(0.0, float(spec.min_selector_selector_distance_A) - float(ss))
+
+    hbond_component = float(spec.hbond_weight) * float(hb.geometric_fraction)
+    clash_component = float(spec.clash_weight) * float(deficit)
+    score = hbond_component - clash_component
+    return score, hb, dmin, class_min
 
 
 def optimize_selector_ordering(
@@ -68,15 +101,25 @@ def optimize_selector_ordering(
     choose one rotamer pose per site and apply it consistently across residues.
     """
     if not spec.enabled:
-        baseline_score, baseline_hb, baseline_dmin = _objective(mol, selector, spec)
+        baseline_score, baseline_hb, baseline_dmin, baseline_class = _objective(
+            mol, selector, spec
+        )
         return Chem.Mol(mol), {
             "enabled": False,
             "baseline_score": baseline_score,
-            "baseline_hbond_fraction": baseline_hb.fraction,
+            "baseline_hbond_like_fraction": baseline_hb.like_fraction,
+            "baseline_hbond_geometric_fraction": baseline_hb.geometric_fraction,
             "baseline_min_heavy_distance_A": baseline_dmin,
+            "baseline_class_min_distance_A": {
+                k: _finite_or_none(v) for k, v in baseline_class.items()
+            },
             "final_score": baseline_score,
-            "final_hbond_fraction": baseline_hb.fraction,
+            "final_hbond_like_fraction": baseline_hb.like_fraction,
+            "final_hbond_geometric_fraction": baseline_hb.geometric_fraction,
             "final_min_heavy_distance_A": baseline_dmin,
+            "final_class_min_distance_A": {
+                k: _finite_or_none(v) for k, v in baseline_class.items()
+            },
             "selected_pose_by_site": {},
         }
 
@@ -89,7 +132,9 @@ def optimize_selector_ordering(
     pose_library = enumerate_pose_library(grid_spec)
 
     work = Chem.Mol(mol)
-    baseline_score, baseline_hb, baseline_dmin = _objective(work, selector, spec)
+    baseline_score, baseline_hb, baseline_dmin, baseline_class = _objective(
+        work, selector, spec
+    )
     selected: Dict[str, Dict[str, float]] = {}
 
     repeat = max(1, min(int(spec.repeat_residues), int(dp)))
@@ -113,7 +158,7 @@ def optimize_selector_ordering(
                         pose_spec=pose,
                         selector=selector,
                     )
-            score, _, _ = _objective(trial, selector, spec)
+            score, _, _, _ = _objective(trial, selector, spec)
             if score > best_score:
                 best_score = score
                 best_mol = trial
@@ -122,17 +167,25 @@ def optimize_selector_ordering(
         work = best_mol
         selected[site] = best_pose
 
-    final_score, final_hb, final_dmin = _objective(work, selector, spec)
+    final_score, final_hb, final_dmin, final_class = _objective(work, selector, spec)
     summary: Dict[str, object] = {
         "enabled": True,
         "repeat_residues": repeat,
         "candidate_count": len(pose_library),
         "baseline_score": baseline_score,
-        "baseline_hbond_fraction": baseline_hb.fraction,
+        "baseline_hbond_like_fraction": baseline_hb.like_fraction,
+        "baseline_hbond_geometric_fraction": baseline_hb.geometric_fraction,
         "baseline_min_heavy_distance_A": baseline_dmin,
+        "baseline_class_min_distance_A": {
+            k: _finite_or_none(v) for k, v in baseline_class.items()
+        },
         "final_score": final_score,
-        "final_hbond_fraction": final_hb.fraction,
+        "final_hbond_like_fraction": final_hb.like_fraction,
+        "final_hbond_geometric_fraction": final_hb.geometric_fraction,
         "final_min_heavy_distance_A": final_dmin,
+        "final_class_min_distance_A": {
+            k: _finite_or_none(v) for k, v in final_class.items()
+        },
         "selected_pose_by_site": selected,
     }
     return work, summary

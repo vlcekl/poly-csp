@@ -1,4 +1,10 @@
-# poly_csp/config/presets.py
+"""Reference helix presets.
+
+This module is currently reference-only and is not the runtime source of truth
+for pipeline defaults. Active defaults are managed by Hydra YAML files in
+`conf/helix/`.
+"""
+
 from __future__ import annotations
 import math
 from poly_csp.config.schema import HelixSpec
@@ -25,8 +31,7 @@ def _make_from_residues_per_turn(
         handedness=handedness,  # informational
     )
 
-# --- Cellulose: 2_1 screw (180° per residue), ~10.3 Å repeat per 2 residues -> ~5.15 Å/residue
-# Cellulose crystals show twofold symmetry with ~10.3 Å repeat distance. :contentReference[oaicite:3]{index=3}
+# --- Cellulose: 2_1 screw (180° per residue), ~10.3 Å repeat per 2 residues.
 cellulose_i_2_1 = _make_from_residues_per_turn(
     name="cellulose_I_2_1",
     residues_per_turn=2.0,
@@ -34,15 +39,15 @@ cellulose_i_2_1 = _make_from_residues_per_turn(
     handedness="right",  # 2_1 is effectively non-chiral; choose a sign convention and stick to it.
 )
 
-# --- Amylose V-helix: 6 residues per turn, pitch ~7.8–7.9 Å (V-amylose complexes) :contentReference[oaicite:4]{index=4}
+# --- Amylose V-helix: 6 residues per turn, pitch ~7.8–7.9 Å.
 amylose_v6_1 = _make_from_residues_per_turn(
     name="amylose_V_6_1",
     residues_per_turn=6.0,
     rise_A=7.8 / 6.0,  # ≈1.30 Å per residue
-    handedness="left", # V-amylose often described as left-handed in these complexes :contentReference[oaicite:5]{index=5}
+    handedness="left",
 )
 
-# --- Amylose tris(3,5-DMPC): reported left-handed 4/3 helix in solution (NOESY+modeling) :contentReference[oaicite:6]{index=6}
+# --- Amylose tris(3,5-DMPC): left-handed 4/3 helix starting guess.
 # The exact pitch/rise is solvent- and substitution-dependent; use as a tunable *starting guess*.
 # If helix is "4/3", interpret as 4 residues per 3 turns -> rotation per residue = 360*(3/4)=270° = 3π/2.
 # This produces a strong per-residue twist (often effectively -90° depending on convention); treat as experimental-calibrated later.

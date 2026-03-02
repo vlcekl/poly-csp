@@ -1,25 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.integration
 
 
 def _run_build(overrides: str) -> None:
-    cmd = [
-        "conda",
-        "run",
-        "-n",
-        "polycsp",
-        "bash",
-        "-lc",
-        (
-            "cd /home/lukas/work/projects/poly_csp && "
-            "PYTHONPATH=src python -m poly_csp.pipelines.build_csp "
-            + overrides
-        ),
-    ]
-    subprocess.run(cmd, check=True, text=True, capture_output=True)
+    cmd = [sys.executable, "-m", "poly_csp.pipelines.build_csp", *shlex.split(overrides)]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_ROOT / "src")
+    subprocess.run(
+        cmd, check=True, text=True, capture_output=True, cwd=_ROOT, env=env
+    )
 
 
 def test_pipeline_capped_mode_runs_with_explicit_caps(tmp_path: Path) -> None:

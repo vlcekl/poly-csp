@@ -38,6 +38,7 @@ Thumbs.db
 /logs/
 /outputs/
 /legacy/
+/scratch/
 
 # Env / secrets
 .env

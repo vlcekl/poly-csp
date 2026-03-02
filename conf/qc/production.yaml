@@ -5,18 +5,18 @@ exclude_13: true
 exclude_14: false
 
 # Global heavy-atom minimum distance.
-min_heavy_distance_A: 1.05
+min_heavy_distance_A: 1.10
 
 # Per-class minimum distances.
-min_backbone_backbone_distance_A: 1.05
-min_backbone_selector_distance_A: 1.00
-min_selector_selector_distance_A: 1.00
+min_backbone_backbone_distance_A: 1.10
+min_backbone_selector_distance_A: 1.05
+min_selector_selector_distance_A: 1.05
 
 # Symmetry and ordering-related QC checks.
-max_screw_symmetry_rmsd_A: 0.50
+max_screw_symmetry_rmsd_A: 0.30
 min_hbond_like_fraction: 0.00
 min_hbond_geometric_fraction: 0.00
 max_selector_torsion_std_deg: null
 
-# Optional hard-fail for CLI/CI usage.
-fail_on_thresholds: false
+# Hard-fail enabled for production/CI runs.
+fail_on_thresholds: true
