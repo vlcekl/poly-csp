@@ -1,21 +1,72 @@
 # poly_csp/chemistry/selectors.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 from rdkit import Chem
+
+
+def infer_donor_acceptor_atoms(mol: Chem.Mol) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """
+    Lightweight donor/acceptor inference for selector plugins.
+    """
+    donors: list[int] = []
+    acceptors: list[int] = []
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        z = atom.GetAtomicNum()
+        charge = atom.GetFormalCharge()
+        if z == 7:
+            has_h = any(nbr.GetAtomicNum() == 1 for nbr in atom.GetNeighbors())
+            if has_h and charge <= 0:
+                donors.append(idx)
+            if charge <= 0 and not atom.GetIsAromatic():
+                acceptors.append(idx)
+        elif z == 8:
+            if charge <= 0:
+                acceptors.append(idx)
+        elif z == 16 and charge <= 0:
+            acceptors.append(idx)
+    return tuple(donors), tuple(acceptors)
 
 
 @dataclass(frozen=True)
 class SelectorTemplate:
     name: str
     mol: Chem.Mol
-    attach_atom_idx: int  # on selector, atom to bond from (typically carbonyl carbon)
+    attach_atom_idx: int  # atom to bond from (typically carbonyl carbon)
     dihedrals: Dict[str, Tuple[int, int, int, int]]  # selector-local indices
     donors: Tuple[int, ...] = ()
     acceptors: Tuple[int, ...] = ()
-    attach_dummy_idx: int | None = None  # optional [*] to be replaced at attachment time
+    attach_dummy_idx: int | None = None  # optional [*] replaced at attachment
+    features: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
+
+
+def selector_from_smiles(
+    name: str,
+    smiles: str,
+    attach_atom_idx: int,
+    dihedrals: Dict[str, Tuple[int, int, int, int]],
+    attach_dummy_idx: int | None = None,
+    auto_detect_hbond: bool = True,
+) -> SelectorTemplate:
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid selector SMILES for {name!r}.")
+    Chem.SanitizeMol(mol)
+
+    donors, acceptors = infer_donor_acceptor_atoms(mol) if auto_detect_hbond else ((), ())
+    return SelectorTemplate(
+        name=name,
+        mol=mol,
+        attach_atom_idx=int(attach_atom_idx),
+        attach_dummy_idx=attach_dummy_idx,
+        dihedrals=dict(dihedrals),
+        donors=tuple(donors),
+        acceptors=tuple(acceptors),
+        features={"donors": tuple(donors), "acceptors": tuple(acceptors)},
+    )
 
 
 class SelectorRegistry:
@@ -34,7 +85,6 @@ class SelectorRegistry:
             tpl = make_35_dmpc_template()
             cls.register(tpl)
             cls._reg["35dmpc"] = tpl
-        # Common alias used by configs.
         cls._reg["dmpc_35"] = tpl
 
     @classmethod

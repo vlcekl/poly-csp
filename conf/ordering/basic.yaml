@@ -1,0 +1,8 @@
+enabled: false
+repeat_residues: 1
+max_distance_A: 3.3
+neighbor_window: 1
+clash_target_A: 1.1
+hbond_weight: 8.0
+clash_weight: 10.0
+max_candidates: 64

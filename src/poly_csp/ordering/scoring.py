@@ -1,37 +1,169 @@
 from __future__ import annotations
+
+from collections import deque
+from typing import Dict, Iterable, List, Tuple
+
 import numpy as np
+from rdkit import Chem
+
 from poly_csp.config.schema import HelixSpec
+from poly_csp.geometry.dihedrals import measure_dihedral_rad
 from poly_csp.geometry.transform import ScrewTransform
 
-def min_interatomic_distance(coords: np.ndarray, heavy_mask: np.ndarray) -> float:
+
+def bonded_exclusion_pairs(mol: Chem.Mol, max_path_length: int = 2) -> set[tuple[int, int]]:
+    """Return atom pairs with shortest bond-path <= max_path_length."""
+    n = mol.GetNumAtoms()
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for bond in mol.GetBonds():
+        i = bond.GetBeginAtomIdx()
+        j = bond.GetEndAtomIdx()
+        adj[i].append(j)
+        adj[j].append(i)
+
+    excluded: set[tuple[int, int]] = set()
+    for src in range(n):
+        q: deque[tuple[int, int]] = deque([(src, 0)])
+        seen = {src}
+        while q:
+            node, depth = q.popleft()
+            if depth >= max_path_length:
+                continue
+            for nbr in adj[node]:
+                if nbr not in seen:
+                    seen.add(nbr)
+                    q.append((nbr, depth + 1))
+                i, j = (src, nbr) if src < nbr else (nbr, src)
+                if src != nbr:
+                    excluded.add((i, j))
+    return excluded
+
+
+def min_interatomic_distance(
+    coords: np.ndarray,
+    heavy_mask: np.ndarray,
+    excluded_pairs: set[tuple[int, int]] | None = None,
+) -> float:
     idx = np.where(heavy_mask)[0]
-    X = coords[idx]
-    # O(N^2) naive for now; fine for small DP smoke tests
+    if idx.size < 2:
+        return float("inf")
+    excluded = excluded_pairs or set()
+
     dmin = float("inf")
-    for i in range(len(X)):
-        diffs = X[i+1:] - X[i]
+    for pos_i, i in enumerate(idx):
+        tail = idx[pos_i + 1 :]
+        if tail.size == 0:
+            continue
+        diffs = coords[tail] - coords[i]
         d2 = np.sum(diffs * diffs, axis=1)
-        if d2.size:
-            dmin = min(dmin, float(np.sqrt(np.min(d2))))
+        for k, j in enumerate(tail):
+            pair = (int(i), int(j)) if i < j else (int(j), int(i))
+            if pair in excluded:
+                continue
+            dmin = min(dmin, float(np.sqrt(d2[k])))
     return dmin
 
-def screw_symmetry_rmsd(coords: np.ndarray, residue_atom_count: int, helix: HelixSpec, k: int = 1) -> float:
+
+def _atom_class(atom: Chem.Atom) -> str:
+    return "selector" if atom.HasProp("_poly_csp_selector_instance") else "backbone"
+
+
+def min_distance_by_class(
+    mol: Chem.Mol,
+    coords: np.ndarray,
+    heavy_mask: np.ndarray,
+    excluded_pairs: set[tuple[int, int]] | None = None,
+) -> Dict[str, float]:
+    idx = np.where(heavy_mask)[0]
+    excluded = excluded_pairs or set()
+    out = {
+        "backbone_backbone": float("inf"),
+        "backbone_selector": float("inf"),
+        "selector_selector": float("inf"),
+    }
+    for a_pos, i in enumerate(idx):
+        ai = mol.GetAtomWithIdx(int(i))
+        ci = _atom_class(ai)
+        for j in idx[a_pos + 1 :]:
+            pair = (int(i), int(j)) if i < j else (int(j), int(i))
+            if pair in excluded:
+                continue
+            aj = mol.GetAtomWithIdx(int(j))
+            cj = _atom_class(aj)
+            if ci == "backbone" and cj == "backbone":
+                key = "backbone_backbone"
+            elif ci == "selector" and cj == "selector":
+                key = "selector_selector"
+            else:
+                key = "backbone_selector"
+            d = float(np.linalg.norm(coords[int(i)] - coords[int(j)]))
+            if d < out[key]:
+                out[key] = d
+    return out
+
+
+def screw_symmetry_rmsd(
+    coords: np.ndarray,
+    residue_atom_count: int,
+    helix: HelixSpec,
+    k: int = 1,
+) -> float:
     """
     Compare residue 0 to residue k mapped back by inverse screw, RMSD on atoms.
-    This is a minimal gate; later you’ll likely compare many residues and average.
     """
     if coords.shape[0] < (k + 1) * residue_atom_count:
         return 0.0
 
-    screw = ScrewTransform(theta_rad=helix.theta_rad, rise_A=helix.rise_A)
-
     res0 = coords[0:residue_atom_count]
-    resk = coords[k*residue_atom_count:(k+1)*residue_atom_count]
+    resk = coords[k * residue_atom_count : (k + 1) * residue_atom_count]
 
-    # Map residue k back to residue 0 by applying inverse screw k steps
-    # Inverse: rotate by -theta, translate by -rise
     inv = ScrewTransform(theta_rad=-helix.theta_rad, rise_A=-helix.rise_A)
     resk_mapped = inv.apply(resk, k)
 
     diff = res0 - resk_mapped
     return float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+
+
+def selector_torsion_stats(
+    mol: Chem.Mol,
+    selector_dihedrals: Dict[str, tuple[int, int, int, int]],
+    attach_dummy_idx: int | None,
+) -> Dict[str, Dict[str, float]]:
+    if mol.GetNumConformers() == 0:
+        return {}
+    xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
+
+    instances: Dict[int, Dict[int, int]] = {}
+    for atom in mol.GetAtoms():
+        if not atom.HasProp("_poly_csp_selector_instance"):
+            continue
+        inst = int(atom.GetIntProp("_poly_csp_selector_instance"))
+        local = int(atom.GetIntProp("_poly_csp_selector_local_idx"))
+        instances.setdefault(inst, {})[local] = atom.GetIdx()
+
+    values_deg: Dict[str, List[float]] = {name: [] for name in selector_dihedrals}
+    for mapping in instances.values():
+        for name, (a_l, b_l, c_l, d_l) in selector_dihedrals.items():
+            local = (a_l, b_l, c_l, d_l)
+            if attach_dummy_idx is not None and attach_dummy_idx in local:
+                # Skip dummy-dependent torsions in aggregate statistics.
+                continue
+            if any(idx not in mapping for idx in local):
+                continue
+            a, b, c, d = (mapping[a_l], mapping[b_l], mapping[c_l], mapping[d_l])
+            angle = np.rad2deg(measure_dihedral_rad(xyz, a, b, c, d))
+            values_deg[name].append(float(angle))
+
+    out: Dict[str, Dict[str, float]] = {}
+    for name, vals in values_deg.items():
+        if not vals:
+            continue
+        arr = np.asarray(vals, dtype=float)
+        out[name] = {
+            "count": float(arr.size),
+            "mean_deg": float(arr.mean()),
+            "std_deg": float(arr.std()),
+            "min_deg": float(arr.min()),
+            "max_deg": float(arr.max()),
+        }
+    return out

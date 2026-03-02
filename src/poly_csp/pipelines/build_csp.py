@@ -1,11 +1,11 @@
 # src/poly_csp/pipelines/build_csp.py
 """
-Minimal working CSP build pipeline skeleton.
+Minimal working CSP build pipeline.
 
 - Uses Hydra configs from /conf at repo root.
 - Builds a helically symmetric amylose/cellulose backbone (coords only -> RDKit mol).
-- Optionally attaches a selector (placeholder wiring; chemistry details live in functionalization.py).
-- Writes PDB + JSON build report.
+- Optionally attaches selector(s), runs deterministic pre-ordering, and restrained MM.
+- Writes PDB + JSON build report (+ optional AMBER scaffold export).
 
 Run (from repo root):
   python -m poly_csp.pipelines.build_csp
@@ -35,20 +35,52 @@ from poly_csp.config.schema import (
     SelectorPoseSpec,
     Site,
 )
+from poly_csp.io.amber import export_amber_artifacts
 from poly_csp.io.pdb import write_pdb_from_rdkit
-from poly_csp.ordering.scoring import min_interatomic_distance, screw_symmetry_rmsd
+from poly_csp.ordering.hbonds import compute_hbond_metrics
+from poly_csp.ordering.scoring import (
+    bonded_exclusion_pairs,
+    min_distance_by_class,
+    min_interatomic_distance,
+    screw_symmetry_rmsd,
+    selector_torsion_stats,
+)
+from poly_csp.ordering.symmetry_opt import OrderingSpec, optimize_selector_ordering
 
-# Optional selector imports (keep pipeline runnable even before selector is implemented)
+# Optional selector imports (keep pipeline runnable even before selector is implemented).
 try:
-    from poly_csp.chemistry.selectors import SelectorRegistry
+    from poly_csp.chemistry.selectors import SelectorRegistry, SelectorTemplate
     from poly_csp.chemistry.functionalization import (
         apply_selector_pose_dihedrals,
         attach_selector,
     )
 except Exception:  # noqa: BLE001
     SelectorRegistry = None  # type: ignore
+    SelectorTemplate = None  # type: ignore
     apply_selector_pose_dihedrals = None  # type: ignore
     attach_selector = None  # type: ignore
+
+# Optional MM imports (keep baseline path runnable if OpenMM is unavailable).
+try:
+    from poly_csp.mm.minimize import RelaxSpec, run_staged_relaxation
+except Exception:  # noqa: BLE001
+    RelaxSpec = None  # type: ignore
+    run_staged_relaxation = None  # type: ignore
+
+
+@dataclass(frozen=True)
+class QcSpec:
+    enabled: bool = True
+    exclude_13: bool = True
+    exclude_14: bool = False
+    min_heavy_distance_A: float = 1.05
+    min_backbone_backbone_distance_A: float = 1.05
+    min_backbone_selector_distance_A: float = 1.0
+    min_selector_selector_distance_A: float = 1.0
+    max_screw_symmetry_rmsd_A: float = 0.50
+    min_hbond_fraction: float = 0.0
+    max_selector_torsion_std_deg: Optional[float] = None
+    fail_on_thresholds: bool = False
 
 
 @dataclass
@@ -67,23 +99,125 @@ class BuildReport:
     selector_name: Optional[str]
     selector_sites: List[str]
     selector_pose_dihedral_targets_deg: dict[str, float]
+    ordering_enabled: bool
+    ordering_summary: dict[str, object]
+    relax_enabled: bool
+    relax_summary: dict[str, object]
     qc_min_heavy_distance_A: float
+    qc_class_min_distance_A: dict[str, Optional[float]]
     qc_screw_symmetry_rmsd_A: float
+    qc_hbond_fraction: float
+    qc_hbond_total_pairs: int
+    qc_selector_torsion_stats_deg: dict[str, dict[str, float]]
+    qc_thresholds: dict[str, object]
+    qc_pass: bool
+    qc_fail_reasons: List[str]
+    amber_enabled: bool
+    amber_summary: dict[str, object]
     output_export_formats: List[str]
 
 
 def _cfg_to_helixspec(cfg: DictConfig) -> HelixSpec:
-    # Expect hydra config at cfg.helix.* fields.
-    # This keeps the pipeline independent of how you structure YAML, as long as keys match.
     return HelixSpec(
         name=str(cfg.helix.name),
         theta_rad=float(cfg.helix.theta_rad),
         rise_A=float(cfg.helix.rise_A),
-        repeat_residues=int(cfg.helix.repeat_residues) if "repeat_residues" in cfg.helix else None,
+        repeat_residues=int(cfg.helix.repeat_residues)
+        if "repeat_residues" in cfg.helix
+        else None,
         repeat_turns=int(cfg.helix.repeat_turns) if "repeat_turns" in cfg.helix else None,
         residues_per_turn=float(cfg.helix.residues_per_turn),
         pitch_A=float(cfg.helix.pitch_A),
         handedness=str(cfg.helix.handedness) if "handedness" in cfg.helix else "right",
+    )
+
+
+def _cfg_to_ordering_spec(cfg: DictConfig) -> OrderingSpec:
+    if "ordering" not in cfg or cfg.ordering is None:
+        return OrderingSpec()
+    payload = OmegaConf.to_container(cfg.ordering, resolve=True)
+    if not isinstance(payload, dict):
+        return OrderingSpec()
+    return OrderingSpec(**payload)
+
+
+def _cfg_to_relax_spec(cfg: DictConfig):
+    if RelaxSpec is None:
+        return None
+    relax_cfg = cfg.relax if "relax" in cfg and cfg.relax is not None else {}
+    anneal_cfg = (
+        relax_cfg.anneal
+        if hasattr(relax_cfg, "anneal") and relax_cfg.anneal is not None
+        else {}
+    )
+    return RelaxSpec(
+        enabled=bool(relax_cfg.enabled if "enabled" in relax_cfg else False),
+        positional_k=float(
+            relax_cfg.positional_k if "positional_k" in relax_cfg else 5000.0
+        ),
+        dihedral_k=float(relax_cfg.dihedral_k if "dihedral_k" in relax_cfg else 500.0),
+        hbond_k=float(relax_cfg.hbond_k if "hbond_k" in relax_cfg else 50.0),
+        n_stages=int(relax_cfg.n_stages if "n_stages" in relax_cfg else 3),
+        max_iterations=int(
+            relax_cfg.max_iterations if "max_iterations" in relax_cfg else 200
+        ),
+        anneal_enabled=bool(anneal_cfg.enabled if "enabled" in anneal_cfg else False),
+        t_start_K=float(anneal_cfg.t_start_K if "t_start_K" in anneal_cfg else 50.0),
+        t_end_K=float(anneal_cfg.t_end_K if "t_end_K" in anneal_cfg else 350.0),
+        anneal_steps=int(anneal_cfg.n_steps if "n_steps" in anneal_cfg else 2000),
+    )
+
+
+def _cfg_to_qc_spec(cfg: DictConfig) -> QcSpec:
+    qc_cfg = cfg.qc if "qc" in cfg and cfg.qc is not None else {}
+    return QcSpec(
+        enabled=bool(qc_cfg.enabled if "enabled" in qc_cfg else True),
+        exclude_13=bool(qc_cfg.exclude_13 if "exclude_13" in qc_cfg else True),
+        exclude_14=bool(qc_cfg.exclude_14 if "exclude_14" in qc_cfg else False),
+        min_heavy_distance_A=float(
+            qc_cfg.min_heavy_distance_A if "min_heavy_distance_A" in qc_cfg else 1.05
+        ),
+        min_backbone_backbone_distance_A=float(
+            qc_cfg.min_backbone_backbone_distance_A
+            if "min_backbone_backbone_distance_A" in qc_cfg
+            else 1.05
+        ),
+        min_backbone_selector_distance_A=float(
+            qc_cfg.min_backbone_selector_distance_A
+            if "min_backbone_selector_distance_A" in qc_cfg
+            else 1.0
+        ),
+        min_selector_selector_distance_A=float(
+            qc_cfg.min_selector_selector_distance_A
+            if "min_selector_selector_distance_A" in qc_cfg
+            else 1.0
+        ),
+        max_screw_symmetry_rmsd_A=float(
+            qc_cfg.max_screw_symmetry_rmsd_A
+            if "max_screw_symmetry_rmsd_A" in qc_cfg
+            else 0.50
+        ),
+        min_hbond_fraction=float(
+            qc_cfg.min_hbond_fraction if "min_hbond_fraction" in qc_cfg else 0.0
+        ),
+        max_selector_torsion_std_deg=(
+            float(qc_cfg.max_selector_torsion_std_deg)
+            if "max_selector_torsion_std_deg" in qc_cfg
+            and qc_cfg.max_selector_torsion_std_deg is not None
+            else None
+        ),
+        fail_on_thresholds=bool(
+            qc_cfg.fail_on_thresholds if "fail_on_thresholds" in qc_cfg else False
+        ),
+    )
+
+
+def _selector_enabled(cfg: DictConfig) -> bool:
+    return bool(
+        "selector" in cfg
+        and cfg.selector is not None
+        and "enabled" in cfg.selector
+        and cfg.selector.enabled
     )
 
 
@@ -94,31 +228,18 @@ def _ensure_outdir(path: str | Path) -> Path:
 
 
 def _heavy_atom_mask_from_rdkit(mol) -> np.ndarray:
-    # Simple heavy atom mask: atomic number > 1
     mask = np.zeros((mol.GetNumAtoms(),), dtype=bool)
-    for i, a in enumerate(mol.GetAtoms()):
-        mask[i] = a.GetAtomicNum() > 1
+    for i, atom in enumerate(mol.GetAtoms()):
+        mask[i] = atom.GetAtomicNum() > 1
     return mask
+
+
+def _finite_or_none(value: float) -> Optional[float]:
+    return float(value) if np.isfinite(value) else None
 
 
 @hydra.main(config_path="../../../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    """
-    Hydra entry point.
-
-    Required config fields (minimal):
-      cfg.polymer.kind: "amylose"|"cellulose"
-      cfg.polymer.dp: int
-      cfg.helix.*: HelixSpec fields
-      cfg.output.dir: str
-
-    Optional:
-      cfg.selector.enabled: bool
-      cfg.selector.name: str
-      cfg.selector.sites: list[str] e.g. ["C6"] or ["C2","C3","C6"]
-    """
-    # Resolve Hydra config to plain dict for logging/debug
-    cfg_resolved = OmegaConf.to_container(cfg, resolve=True)
     print("=== poly_csp build_csp ===")
     print(OmegaConf.to_yaml(cfg))
 
@@ -135,12 +256,21 @@ def main(cfg: DictConfig) -> None:
         if "end_caps" in cfg.polymer and cfg.polymer.end_caps is not None
         else {}
     )
+
     output_export_formats = (
-        [str(x) for x in cfg.output.export_formats]
+        [str(x).strip().lower() for x in cfg.output.export_formats]
         if "output" in cfg and "export_formats" in cfg.output
         else ["pdb"]
     )
-    unsupported_formats = [fmt for fmt in output_export_formats if fmt not in {"pdb"}]
+    amber_cfg_enabled = bool(
+        "amber" in cfg and cfg.amber is not None and "enabled" in cfg.amber and cfg.amber.enabled
+    )
+    if amber_cfg_enabled and "amber" not in output_export_formats:
+        output_export_formats.append("amber")
+
+    unsupported_formats = [
+        fmt for fmt in output_export_formats if fmt not in {"pdb", "amber"}
+    ]
     if unsupported_formats:
         raise NotImplementedError(
             "Requested export formats are not implemented yet: "
@@ -156,12 +286,23 @@ def main(cfg: DictConfig) -> None:
         end_caps=end_caps,
         helix=helix,
     )
+    ordering_spec = _cfg_to_ordering_spec(cfg)
+    qc_spec = _cfg_to_qc_spec(cfg)
 
-    # Output directory (Hydra changes cwd by default; use cfg.output.dir relative to original project root)
-    # Hydra sets the run dir as current working directory. We'll write into it by default unless user sets absolute.
-    outdir = _ensure_outdir(cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs")
+    relax_requested = bool(
+        "relax" in cfg and cfg.relax is not None and "enabled" in cfg.relax and cfg.relax.enabled
+    )
+    relax_spec = _cfg_to_relax_spec(cfg)
+    if relax_requested and (run_staged_relaxation is None or relax_spec is None):
+        raise RuntimeError(
+            "Relaxation requested but OpenMM modules are unavailable in this environment."
+        )
 
-    # ---- Stage 1/2: backbone template + helical coords + polymerize
+    outdir = _ensure_outdir(
+        cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs"
+    )
+
+    # ---- Stage 1/2: backbone template + helical coords + polymerize.
     template = make_glucose_template(
         backbone.polymer,
         monomer_representation=backbone.monomer_representation,
@@ -192,11 +333,14 @@ def main(cfg: DictConfig) -> None:
         coords_for_mol = coords[keep_mask]
     mol_poly = assign_conformer(mol_poly, coords_for_mol)
 
-    # ---- Stage 3 (optional): attach selectors
-    selector_enabled = bool(getattr(cfg, "selector", {}).get("enabled", False)) if isinstance(cfg_resolved, dict) else False
-    selector_name = None
+    # ---- Stage 3: optional selector attachment and deterministic pose setup.
+    selector_enabled = _selector_enabled(cfg)
+    selector_name: Optional[str] = None
     selector_sites: List[Site] = []
     selector_pose = SelectorPoseSpec()
+    selector: SelectorTemplate | None = None
+    ordering_summary: dict[str, object] = {}
+    ordering_applied = False
 
     if selector_enabled:
         if (
@@ -205,19 +349,18 @@ def main(cfg: DictConfig) -> None:
             or apply_selector_pose_dihedrals is None
         ):
             raise RuntimeError(
-                "Selector attachment requested but selector modules are not available. "
-                "Implement chemistry/selectors.py and chemistry/functionalization.py."
+                "Selector attachment requested but selector modules are not available."
             )
 
         selector_name = str(cfg.selector.name)
         selector_sites = [str(s) for s in cfg.selector.sites]  # type: ignore[assignment]
         selector = SelectorRegistry.get(selector_name)
+
         if "pose" in cfg.selector and cfg.selector.pose is not None:
             pose_payload = OmegaConf.to_container(cfg.selector.pose, resolve=True)
             if isinstance(pose_payload, dict):
                 selector_pose = SelectorPoseSpec(**pose_payload)
 
-        # Attach across all residues/sites and optionally apply requested pose dihedrals.
         for res_i in range(backbone.dp):
             for site in selector_sites:
                 mol_poly = attach_selector(
@@ -237,19 +380,48 @@ def main(cfg: DictConfig) -> None:
                         selector=selector,
                     )
 
-    # ---- QC metrics
+        if ordering_spec.enabled:
+            mol_poly, ordering_summary = optimize_selector_ordering(
+                mol=mol_poly,
+                selector=selector,
+                sites=selector_sites,
+                dp=backbone.dp,
+                spec=ordering_spec,
+            )
+            ordering_applied = True
+
+    # ---- Stage 5: optional restrained relaxation.
+    relax_summary: dict[str, object] = {"enabled": False}
+    relax_enabled = False
+    if relax_spec is not None and bool(relax_spec.enabled):
+        if run_staged_relaxation is None:
+            raise RuntimeError(
+                "Relaxation requested but run_staged_relaxation is unavailable."
+            )
+        mol_poly, relax_summary = run_staged_relaxation(
+            mol=mol_poly,
+            spec=relax_spec,
+            selector=selector,
+        )
+        relax_enabled = True
+
+    # ---- Stage 6: QC metrics and threshold evaluation.
     conf = mol_poly.GetConformer(0)
-    xyz = np.array(conf.GetPositions(), dtype=float)  # OpenMM Vec3-like -> numpy array; may be (N,3) already depending on RDKit build
-    xyz = np.asarray(xyz).reshape((-1, 3))
-
+    xyz = np.asarray(conf.GetPositions(), dtype=float).reshape((-1, 3))
     heavy_mask = _heavy_atom_mask_from_rdkit(mol_poly)
-    qc_min_dist = float(min_interatomic_distance(xyz, heavy_mask))
 
-    # screw symmetry RMSD for backbone: compare residue 0 vs residue k mapped by screw (k = repeat_residues if present else 1)
+    max_path_length = 1 + int(qc_spec.exclude_13) + int(qc_spec.exclude_14)
+    excluded_pairs = (
+        bonded_exclusion_pairs(mol_poly, max_path_length=max_path_length)
+        if qc_spec.enabled
+        else set()
+    )
+    qc_min_dist = float(min_interatomic_distance(xyz, heavy_mask, excluded_pairs))
+    qc_class_dist_raw = min_distance_by_class(mol_poly, xyz, heavy_mask, excluded_pairs)
+    qc_class_dist = {k: _finite_or_none(v) for k, v in qc_class_dist_raw.items()}
+
     n_atoms_per_res = template.mol.GetNumAtoms()
     k = int(helix.repeat_residues) if helix.repeat_residues else 1
-    # Compute symmetry RMSD on the backbone-only coordinates so selector atoms
-    # (which are appended after polymer atoms) do not pollute residue indexing.
     qc_sym_rmsd = float(
         screw_symmetry_rmsd(
             coords,
@@ -258,6 +430,116 @@ def main(cfg: DictConfig) -> None:
             k=k,
         )
     )
+
+    qc_hbond_fraction = 0.0
+    qc_hbond_total_pairs = 0
+    qc_selector_torsions: dict[str, dict[str, float]] = {}
+    if selector is not None:
+        hb = compute_hbond_metrics(
+            mol=mol_poly,
+            selector=selector,
+            max_distance_A=ordering_spec.max_distance_A,
+            neighbor_window=ordering_spec.neighbor_window,
+        )
+        qc_hbond_fraction = float(hb.fraction)
+        qc_hbond_total_pairs = int(hb.total_pairs)
+        qc_selector_torsions = selector_torsion_stats(
+            mol=mol_poly,
+            selector_dihedrals=selector.dihedrals,
+            attach_dummy_idx=selector.attach_dummy_idx,
+        )
+
+    qc_thresholds = {
+        "min_heavy_distance_A": float(qc_spec.min_heavy_distance_A),
+        "min_backbone_backbone_distance_A": float(
+            qc_spec.min_backbone_backbone_distance_A
+        ),
+        "min_backbone_selector_distance_A": float(
+            qc_spec.min_backbone_selector_distance_A
+        ),
+        "min_selector_selector_distance_A": float(
+            qc_spec.min_selector_selector_distance_A
+        ),
+        "max_screw_symmetry_rmsd_A": float(qc_spec.max_screw_symmetry_rmsd_A),
+        "min_hbond_fraction": float(qc_spec.min_hbond_fraction),
+        "max_selector_torsion_std_deg": qc_spec.max_selector_torsion_std_deg,
+        "exclude_13": bool(qc_spec.exclude_13),
+        "exclude_14": bool(qc_spec.exclude_14),
+    }
+
+    qc_fail_reasons: List[str] = []
+    if qc_spec.enabled:
+        if qc_min_dist < qc_spec.min_heavy_distance_A:
+            qc_fail_reasons.append(
+                f"min_heavy_distance_A={qc_min_dist:.3f} < {qc_spec.min_heavy_distance_A:.3f}"
+            )
+        bb = qc_class_dist_raw["backbone_backbone"]
+        if np.isfinite(bb) and bb < qc_spec.min_backbone_backbone_distance_A:
+            qc_fail_reasons.append(
+                "backbone_backbone distance "
+                f"{bb:.3f} < {qc_spec.min_backbone_backbone_distance_A:.3f}"
+            )
+        bs = qc_class_dist_raw["backbone_selector"]
+        if np.isfinite(bs) and bs < qc_spec.min_backbone_selector_distance_A:
+            qc_fail_reasons.append(
+                "backbone_selector distance "
+                f"{bs:.3f} < {qc_spec.min_backbone_selector_distance_A:.3f}"
+            )
+        ss = qc_class_dist_raw["selector_selector"]
+        if np.isfinite(ss) and ss < qc_spec.min_selector_selector_distance_A:
+            qc_fail_reasons.append(
+                "selector_selector distance "
+                f"{ss:.3f} < {qc_spec.min_selector_selector_distance_A:.3f}"
+            )
+        if qc_sym_rmsd > qc_spec.max_screw_symmetry_rmsd_A:
+            qc_fail_reasons.append(
+                f"screw_symmetry_rmsd_A={qc_sym_rmsd:.3f} > {qc_spec.max_screw_symmetry_rmsd_A:.3f}"
+            )
+        if selector is not None and qc_hbond_fraction < qc_spec.min_hbond_fraction:
+            qc_fail_reasons.append(
+                f"hbond_fraction={qc_hbond_fraction:.3f} < {qc_spec.min_hbond_fraction:.3f}"
+            )
+        if qc_spec.max_selector_torsion_std_deg is not None:
+            for torsion_name, stats in qc_selector_torsions.items():
+                std_deg = float(stats.get("std_deg", 0.0))
+                if std_deg > qc_spec.max_selector_torsion_std_deg:
+                    qc_fail_reasons.append(
+                        f"{torsion_name}.std_deg={std_deg:.3f} > "
+                        f"{qc_spec.max_selector_torsion_std_deg:.3f}"
+                    )
+
+    qc_pass = len(qc_fail_reasons) == 0
+
+    # ---- Stage 8: optional AMBER scaffold export.
+    amber_enabled = "amber" in output_export_formats
+    amber_summary: dict[str, object] = {"enabled": False}
+    if amber_enabled:
+        amber_dir = (
+            str(cfg.amber.dir)
+            if "amber" in cfg and cfg.amber is not None and "dir" in cfg.amber
+            else "amber"
+        )
+        amber_charge_model = (
+            str(cfg.amber.charge_model)
+            if "amber" in cfg
+            and cfg.amber is not None
+            and "charge_model" in cfg.amber
+            else "bcc"
+        )
+        amber_parameter_backend = (
+            str(cfg.amber.parameter_backend)
+            if "amber" in cfg
+            and cfg.amber is not None
+            and "parameter_backend" in cfg.amber
+            else "placeholder"
+        )
+        amber_summary = export_amber_artifacts(
+            mol=mol_poly,
+            outdir=outdir / amber_dir,
+            model_name="model",
+            charge_model=amber_charge_model,
+            parameter_backend=amber_parameter_backend,
+        )
 
     report = BuildReport(
         polymer=str(backbone.polymer),
@@ -274,12 +556,25 @@ def main(cfg: DictConfig) -> None:
         selector_name=selector_name,
         selector_sites=[str(s) for s in selector_sites],
         selector_pose_dihedral_targets_deg=dict(selector_pose.dihedral_targets_deg),
+        ordering_enabled=bool(ordering_applied),
+        ordering_summary=ordering_summary,
+        relax_enabled=bool(relax_enabled),
+        relax_summary=relax_summary,
         qc_min_heavy_distance_A=qc_min_dist,
+        qc_class_min_distance_A=qc_class_dist,
         qc_screw_symmetry_rmsd_A=qc_sym_rmsd,
+        qc_hbond_fraction=qc_hbond_fraction,
+        qc_hbond_total_pairs=qc_hbond_total_pairs,
+        qc_selector_torsion_stats_deg=qc_selector_torsions,
+        qc_thresholds=qc_thresholds,
+        qc_pass=bool(qc_pass),
+        qc_fail_reasons=qc_fail_reasons,
+        amber_enabled=bool(amber_enabled),
+        amber_summary=amber_summary,
         output_export_formats=output_export_formats,
     )
 
-    # ---- Write outputs
+    # ---- Write outputs.
     pdb_path = outdir / "model.pdb"
     json_path = outdir / "build_report.json"
     cfg_path = outdir / "resolved_config.yaml"
@@ -287,16 +582,27 @@ def main(cfg: DictConfig) -> None:
     if "pdb" in output_export_formats:
         write_pdb_from_rdkit(mol_poly, pdb_path)
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(asdict(report), f, indent=2)
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(asdict(report), handle, indent=2)
 
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        f.write(OmegaConf.to_yaml(cfg))
+    with open(cfg_path, "w", encoding="utf-8") as handle:
+        handle.write(OmegaConf.to_yaml(cfg))
 
     print(f"\nWrote:\n  {pdb_path}\n  {json_path}\n  {cfg_path}")
+    if amber_enabled and "files" in amber_summary:
+        print(f"  {amber_summary['manifest']}")
     print("\nQC:")
-    print(f"  min heavy-atom distance (Å): {qc_min_dist:.3f}")
-    print(f"  screw symmetry RMSD (Å):     {qc_sym_rmsd:.3f}")
+    print(f"  pass:                         {qc_pass}")
+    print(f"  min heavy-atom distance (A):  {qc_min_dist:.3f}")
+    print(f"  screw symmetry RMSD (A):      {qc_sym_rmsd:.3f}")
+    print(f"  hbond fraction:               {qc_hbond_fraction:.3f}")
+    if qc_fail_reasons:
+        print("  failures:")
+        for reason in qc_fail_reasons:
+            print(f"    - {reason}")
+
+    if qc_spec.fail_on_thresholds and not qc_pass:
+        raise RuntimeError("QC thresholds failed; see build_report.json for details.")
 
 
 if __name__ == "__main__":

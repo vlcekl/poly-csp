@@ -2,7 +2,9 @@ defaults:
   - helix: admcp_chiralpak_ad
   - polymer: amylose
   - selector: dmpc_35
+  - ordering: basic
   - relax: restrained
+  - qc: basic
   - _self_
 
 output:
