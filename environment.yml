@@ -11,6 +11,8 @@ dependencies:
   # Chemistry + simulation (best installed via conda-forge)
   - rdkit>=2023.09
   - openmm>=8.0
+  - ambertools>=24
+  - parmed
 
   # Config + schema
   - pydantic>=2.5

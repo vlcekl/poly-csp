@@ -29,10 +29,16 @@ dihedral application, and future terminal/export stages.
   Terminal policy mode (`open`, `capped`, `periodic`).
 
 - `_poly_csp_end_caps_json`:
-  JSON dictionary of configured end caps (currently metadata only).
+  JSON dictionary of configured end caps.
 
 - `_poly_csp_terminal_topology_pending`:
-  Boolean indicating terminal chemistry edits are still pending implementation.
+  Boolean indicating terminal chemistry edits are pending (`False` for implemented modes).
+
+- `_poly_csp_terminal_meta_json`:
+  JSON dictionary with terminal-mode-specific metadata (e.g., periodic closure bond indices).
+
+- `_poly_csp_terminal_cap_indices_json`:
+  JSON dictionary containing atom indices added by left/right cap operations.
 
 - `_poly_csp_selector_count`:
   Number of selectors attached so far (monotonic with each attach operation).

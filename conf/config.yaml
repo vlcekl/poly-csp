@@ -23,6 +23,7 @@ amber:
   dir: amber
   charge_model: bcc
   parameter_backend: placeholder
+  net_charge: auto
 
 selector:
   enabled: false

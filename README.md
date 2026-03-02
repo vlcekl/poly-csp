@@ -135,6 +135,7 @@ Core stack:
 * Pydantic v2
 * OpenMM
 * Hydra
+* AmberTools (for `antechamber`, `parmchk2`, `tleap` AMBER backend)
 
 Optional (later stages):
 
@@ -206,10 +207,17 @@ This corresponds to literature-reported conformations for amylose tris(3,5-DMPC)
 ## 1. Install
 
 ```bash
+conda env create -f environment.yml
+conda activate polycsp
 pip install -e .
 ```
+Verify AMBER backend tools are available:
 
-Ensure RDKit and OpenMM are properly installed.
+```bash
+which antechamber
+which parmchk2
+which tleap
+```
 
 ---
 

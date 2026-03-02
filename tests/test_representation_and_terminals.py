@@ -79,9 +79,42 @@ def test_apply_terminal_mode_sets_policy_metadata() -> None:
     )
 
     assert open_mol.GetNumAtoms() == n
-    assert capped_mol.GetNumAtoms() == n
+    assert capped_mol.GetNumAtoms() == n + 4
     assert periodic_mol.GetNumAtoms() == n
 
     assert open_mol.GetProp("_poly_csp_end_mode") == "open"
     assert capped_mol.GetProp("_poly_csp_end_mode") == "capped"
     assert periodic_mol.GetProp("_poly_csp_end_mode") == "periodic"
+
+    assert open_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
+    assert capped_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
+    assert periodic_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
+
+
+def test_periodic_mode_closes_terminal_bond() -> None:
+    template = make_glucose_template("amylose")
+    mol = polymerize(template=template, dp=3, linkage="1-4", anomer="alpha")
+    periodic = apply_terminal_mode(mol, mode="periodic", caps={}, representation="anhydro")
+
+    maps = json.loads(periodic.GetProp("_poly_csp_residue_label_map_json"))
+    c1_0 = maps[0]["C1"]
+    o4_last = maps[-1]["O4"]
+    assert periodic.GetBondBetweenAtoms(c1_0, o4_last) is not None
+
+
+def test_periodic_mode_natural_oh_removes_res0_o1() -> None:
+    template = make_glucose_template("amylose", monomer_representation="natural_oh")
+    mol = polymerize(template=template, dp=3, linkage="1-4", anomer="alpha")
+    n0 = mol.GetNumAtoms()
+
+    periodic = apply_terminal_mode(
+        mol,
+        mode="periodic",
+        caps={},
+        representation="natural_oh",
+    )
+
+    maps = json.loads(periodic.GetProp("_poly_csp_residue_label_map_json"))
+    assert "O1" not in maps[0]
+    assert periodic.GetNumAtoms() == n0 - 1
+    assert periodic.GetBondBetweenAtoms(maps[0]["C1"], maps[-1]["O4"]) is not None

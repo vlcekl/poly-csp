@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Sequence
 
 from rdkit import Chem
 
 from poly_csp.io.pdb import write_pdb_from_rdkit
+
+_SUPPORTED_BACKENDS = {"placeholder", "ambertools"}
+_SUPPORTED_CHARGE_MODELS = {"bcc", "gas", "resp"}
+
+
+def _formal_charge(mol: Chem.Mol) -> int:
+    return int(sum(int(atom.GetFormalCharge()) for atom in mol.GetAtoms()))
 
 
 def _write_placeholder_inpcrd(mol: Chem.Mol, path: Path) -> None:
@@ -34,20 +43,65 @@ def _write_placeholder_prmtop(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def export_amber_artifacts(
-    mol: Chem.Mol,
-    outdir: str | Path,
-    model_name: str = "model",
-    charge_model: str = "bcc",
-    parameter_backend: str = "placeholder",
-) -> Dict[str, object]:
-    """
-    Stage-8 scaffold exporter.
-    Produces deterministic handoff files for downstream parameterization.
-    """
-    out = Path(outdir)
-    out.mkdir(parents=True, exist_ok=True)
+def _ensure_required_tools(tools: Sequence[str]) -> None:
+    missing = [tool for tool in tools if shutil.which(tool) is None]
+    if missing:
+        raise RuntimeError(
+            "AMBER backend 'ambertools' requires executables not found on PATH: "
+            + ", ".join(missing)
+            + ". Install AmberTools or use parameter_backend='placeholder'."
+        )
 
+
+def _run_command(cmd: Sequence[str], cwd: Path, log_path: Path) -> None:
+    proc = subprocess.run(
+        list(cmd),
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    combined = (
+        f"$ {' '.join(cmd)}\n\n"
+        f"--- STDOUT ---\n{proc.stdout}\n"
+        f"--- STDERR ---\n{proc.stderr}\n"
+    )
+    log_path.write_text(combined, encoding="utf-8")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {proc.returncode}: {' '.join(cmd)}. "
+            f"See log: {log_path}"
+        )
+
+
+def _write_tleap_input(
+    path: Path,
+    mol2_name: str,
+    frcmod_name: str,
+    lib_name: str,
+    prmtop_name: str,
+    inpcrd_name: str,
+) -> None:
+    text = "\n".join(
+        [
+            "source leaprc.gaff2",
+            f"mol = loadmol2 {mol2_name}",
+            f"loadamberparams {frcmod_name}",
+            f"saveoff mol {lib_name}",
+            f"saveamberparm mol {prmtop_name} {inpcrd_name}",
+            "quit",
+        ]
+    )
+    path.write_text(text + "\n", encoding="utf-8")
+
+
+def _export_placeholder(
+    mol: Chem.Mol,
+    out: Path,
+    model_name: str,
+    charge_model: str,
+    parameter_backend: str,
+) -> Dict[str, object]:
     pdb_path = out / f"{model_name}.pdb"
     prmtop_path = out / f"{model_name}.prmtop"
     inpcrd_path = out / f"{model_name}.inpcrd"
@@ -62,7 +116,7 @@ def export_amber_artifacts(
             [
                 "source leaprc.gaff2",
                 f"mol = loadpdb {pdb_path.name}",
-                "# TODO: load frcmod/off/lib from parameterization pipeline",
+                "# Placeholder export only. No parameterization backend invoked.",
                 f"saveamberparm mol {prmtop_path.name} {inpcrd_path.name}",
                 "quit",
             ]
@@ -90,3 +144,178 @@ def export_amber_artifacts(
     manifest_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     summary["manifest"] = str(manifest_path)
     return summary
+
+
+def _export_ambertools(
+    mol: Chem.Mol,
+    out: Path,
+    model_name: str,
+    charge_model: str,
+    net_charge: int | str | None,
+) -> Dict[str, object]:
+    _ensure_required_tools(("antechamber", "parmchk2", "tleap"))
+
+    charge_model_key = str(charge_model).strip().lower()
+    if charge_model_key not in _SUPPORTED_CHARGE_MODELS:
+        raise ValueError(
+            f"Unsupported amber charge_model {charge_model!r}. "
+            f"Supported values: {sorted(_SUPPORTED_CHARGE_MODELS)}"
+        )
+
+    if net_charge is None or str(net_charge).strip().lower() == "auto":
+        resolved_net_charge = _formal_charge(mol)
+    else:
+        resolved_net_charge = int(net_charge)
+
+    pdb_path = out / f"{model_name}.pdb"
+    mol2_path = out / f"{model_name}.mol2"
+    frcmod_path = out / f"{model_name}.frcmod"
+    lib_path = out / f"{model_name}.lib"
+    prmtop_path = out / f"{model_name}.prmtop"
+    inpcrd_path = out / f"{model_name}.inpcrd"
+    tleap_path = out / "tleap.in"
+    manifest_path = out / "amber_export.json"
+
+    antechamber_log = out / "antechamber.log"
+    parmchk2_log = out / "parmchk2.log"
+    tleap_log = out / "tleap.log"
+
+    write_pdb_from_rdkit(mol, pdb_path)
+
+    antechamber_cmd = [
+        "antechamber",
+        "-i",
+        pdb_path.name,
+        "-fi",
+        "pdb",
+        "-o",
+        mol2_path.name,
+        "-fo",
+        "mol2",
+        "-at",
+        "gaff2",
+        "-c",
+        charge_model_key,
+        "-nc",
+        str(resolved_net_charge),
+        "-rn",
+        "MOL",
+        "-dr",
+        "no",
+        "-pf",
+        "y",
+        "-s",
+        "2",
+    ]
+    _run_command(antechamber_cmd, cwd=out, log_path=antechamber_log)
+
+    parmchk2_cmd = [
+        "parmchk2",
+        "-i",
+        mol2_path.name,
+        "-f",
+        "mol2",
+        "-s",
+        "gaff2",
+        "-o",
+        frcmod_path.name,
+    ]
+    _run_command(parmchk2_cmd, cwd=out, log_path=parmchk2_log)
+
+    _write_tleap_input(
+        path=tleap_path,
+        mol2_name=mol2_path.name,
+        frcmod_name=frcmod_path.name,
+        lib_name=lib_path.name,
+        prmtop_name=prmtop_path.name,
+        inpcrd_name=inpcrd_path.name,
+    )
+    tleap_cmd = ["tleap", "-f", tleap_path.name]
+    _run_command(tleap_cmd, cwd=out, log_path=tleap_log)
+
+    missing_outputs = [
+        str(path)
+        for path in (mol2_path, frcmod_path, lib_path, prmtop_path, inpcrd_path)
+        if not path.exists() or path.stat().st_size == 0
+    ]
+    if missing_outputs:
+        raise RuntimeError(
+            "AmberTools backend completed but expected outputs were not generated: "
+            + ", ".join(missing_outputs)
+        )
+
+    summary: Dict[str, object] = {
+        "enabled": True,
+        "parameterized": True,
+        "charge_model": charge_model_key,
+        "parameter_backend": "ambertools",
+        "net_charge": int(resolved_net_charge),
+        "files": {
+            "pdb": str(pdb_path),
+            "mol2": str(mol2_path),
+            "frcmod": str(frcmod_path),
+            "library": str(lib_path),
+            "prmtop": str(prmtop_path),
+            "inpcrd": str(inpcrd_path),
+            "tleap_input": str(tleap_path),
+            "antechamber_log": str(antechamber_log),
+            "parmchk2_log": str(parmchk2_log),
+            "tleap_log": str(tleap_log),
+        },
+        "commands": {
+            "antechamber": " ".join(antechamber_cmd),
+            "parmchk2": " ".join(parmchk2_cmd),
+            "tleap": " ".join(tleap_cmd),
+        },
+        "notes": [
+            "Parameterized with AmberTools GAFF2 workflow.",
+            "Validate atom typing/charges for production usage.",
+        ],
+    }
+
+    manifest_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary["manifest"] = str(manifest_path)
+    return summary
+
+
+def export_amber_artifacts(
+    mol: Chem.Mol,
+    outdir: str | Path,
+    model_name: str = "model",
+    charge_model: str = "bcc",
+    parameter_backend: str = "placeholder",
+    net_charge: int | str | None = "auto",
+) -> Dict[str, object]:
+    """
+    Export AMBER artifacts using the requested backend.
+
+    Backends:
+    - `placeholder`: deterministic scaffold files (no parameterization).
+    - `ambertools`: antechamber + parmchk2 + tleap GAFF2 parameterization flow.
+    """
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    backend = str(parameter_backend).strip().lower()
+    if backend not in _SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"Unsupported AMBER parameter backend {parameter_backend!r}. "
+            f"Supported values: {sorted(_SUPPORTED_BACKENDS)}"
+        )
+
+    if backend == "placeholder":
+        return _export_placeholder(
+            mol=mol,
+            out=out,
+            model_name=model_name,
+            charge_model=charge_model,
+            parameter_backend=backend,
+        )
+
+    return _export_ambertools(
+        mol=mol,
+        out=out,
+        model_name=model_name,
+        charge_model=charge_model,
+        net_charge=net_charge,
+    )

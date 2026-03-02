@@ -315,12 +315,6 @@ def main(cfg: DictConfig) -> None:
         linkage="1-4",
         anomer="alpha" if backbone.polymer == "amylose" else "beta",
     )
-    mol_poly = apply_terminal_mode(
-        mol=mol_poly,
-        mode=backbone.end_mode,
-        caps=backbone.end_caps,
-        representation=backbone.monomer_representation,
-    )
     removed_old = (
         json.loads(mol_poly.GetProp("_poly_csp_removed_old_indices_json"))
         if mol_poly.HasProp("_poly_csp_removed_old_indices_json")
@@ -332,6 +326,12 @@ def main(cfg: DictConfig) -> None:
         keep_mask[np.asarray(removed_old, dtype=int)] = False
         coords_for_mol = coords[keep_mask]
     mol_poly = assign_conformer(mol_poly, coords_for_mol)
+    mol_poly = apply_terminal_mode(
+        mol=mol_poly,
+        mode=backbone.end_mode,
+        caps=backbone.end_caps,
+        representation=backbone.monomer_representation,
+    )
 
     # ---- Stage 3: optional selector attachment and deterministic pose setup.
     selector_enabled = _selector_enabled(cfg)
@@ -533,12 +533,18 @@ def main(cfg: DictConfig) -> None:
             and "parameter_backend" in cfg.amber
             else "placeholder"
         )
+        amber_net_charge = (
+            cfg.amber.net_charge
+            if "amber" in cfg and cfg.amber is not None and "net_charge" in cfg.amber
+            else "auto"
+        )
         amber_summary = export_amber_artifacts(
             mol=mol_poly,
             outdir=outdir / amber_dir,
             model_name="model",
             charge_model=amber_charge_model,
             parameter_backend=amber_parameter_backend,
+            net_charge=amber_net_charge,
         )
 
     report = BuildReport(
