@@ -38,6 +38,7 @@ from poly_csp.config.schema import (
 from poly_csp.io.amber import export_amber_artifacts
 from poly_csp.io.pdb import write_pdb_from_rdkit
 from poly_csp.io.rdkit_io import write_sdf
+from poly_csp.geometry.pbc import compute_helical_box_vectors, set_box_vectors
 from poly_csp.ordering.hbonds import compute_hbond_metrics
 from poly_csp.ordering.scoring import (
     bonded_exclusion_pairs,
@@ -190,6 +191,9 @@ def _cfg_to_relax_spec(cfg: DictConfig):
         t_start_K=float(anneal_cfg.t_start_K if "t_start_K" in anneal_cfg else 50.0),
         t_end_K=float(anneal_cfg.t_end_K if "t_end_K" in anneal_cfg else 350.0),
         anneal_steps=int(anneal_cfg.n_steps if "n_steps" in anneal_cfg else 2000),
+        anneal_cool_down=bool(
+            anneal_cfg.cool_down if "cool_down" in anneal_cfg else True
+        ),
     )
 
 
@@ -356,15 +360,23 @@ def main(cfg: DictConfig) -> None:
         else "geometry_pre_relax"
     )
 
-    if relax_mode == "ambertools_parameterized":
+    if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax"):
         if not amber_cfg_enabled:
             raise RuntimeError(
-                "relax.mode=ambertools_parameterized requires amber.enabled=true."
+                f"relax.mode={relax_mode} requires amber.enabled=true."
             )
-        if amber_parameter_backend.strip().lower() != "ambertools":
+        backend_lower = amber_parameter_backend.strip().lower()
+        if relax_mode == "ambertools_parameterized" and backend_lower != "ambertools":
             raise RuntimeError(
                 "relax.mode=ambertools_parameterized requires "
                 "amber.parameter_backend=ambertools."
+            )
+        if relax_mode == "hybrid_pre_relax" and backend_lower not in (
+            "ambertools", "residue_aware",
+        ):
+            raise RuntimeError(
+                "relax.mode=hybrid_pre_relax requires "
+                "amber.parameter_backend=ambertools or residue_aware."
             )
         if "amber" not in output_export_formats:
             output_export_formats.append("amber")
@@ -403,6 +415,15 @@ def main(cfg: DictConfig) -> None:
         caps=backbone.end_caps,
         representation=backbone.monomer_representation,
     )
+
+    # ---- Stage 2b: compute and store PBC box vectors for periodic mode.
+    is_periodic = str(backbone.end_mode) == "periodic"
+    if is_periodic:
+        Lx, Ly, Lz = compute_helical_box_vectors(
+            mol=mol_poly, helix=helix, dp=backbone.dp, padding_A=30.0,
+        )
+        set_box_vectors(mol_poly, Lx, Ly, Lz)
+        print(f"  PBC box: {Lx:.1f} x {Ly:.1f} x {Lz:.1f} Å")
 
     # ---- Stage 3: optional selector attachment and deterministic pose setup.
     selector_enabled = _selector_enabled(cfg)
@@ -483,7 +504,9 @@ def main(cfg: DictConfig) -> None:
 
     amber_summary: dict[str, object] = {"enabled": False}
     amber_export_done = False
-    if relax_mode == "ambertools_parameterized":
+    if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax"):
+        from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv_relax
+        _bv_relax = _get_bv_relax(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
             mol=mol_poly,
             outdir=outdir / amber_dir,
@@ -491,6 +514,13 @@ def main(cfg: DictConfig) -> None:
             charge_model=amber_charge_model,
             parameter_backend=amber_parameter_backend,
             net_charge=amber_net_charge,
+            polymer=polymer_kind,
+            dp=dp,
+            selector_mol=(
+                selector.template_mol if selector is not None else None
+            ),
+            periodic=is_periodic,
+            box_vectors_A=_bv_relax,
         )
         amber_export_done = True
 
@@ -506,7 +536,11 @@ def main(cfg: DictConfig) -> None:
             mol=mol_poly,
             spec=relax_spec,
             selector=selector,
-            amber_artifacts=amber_summary if relax_mode == "ambertools_parameterized" else None,
+            amber_artifacts=(
+                amber_summary
+                if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax")
+                else None
+            ),
         )
         relax_enabled = True
 
@@ -632,6 +666,8 @@ def main(cfg: DictConfig) -> None:
     # ---- Stage 8: optional AMBER export (or already exported for parameterized relaxation).
     amber_enabled = "amber" in output_export_formats or amber_export_done
     if amber_enabled and not amber_export_done:
+        from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv
+        _bv = _get_bv(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
             mol=mol_poly,
             outdir=outdir / amber_dir,
@@ -639,6 +675,13 @@ def main(cfg: DictConfig) -> None:
             charge_model=amber_charge_model,
             parameter_backend=amber_parameter_backend,
             net_charge=amber_net_charge,
+            polymer=polymer_kind,
+            dp=dp,
+            selector_mol=(
+                selector.template_mol if selector is not None else None
+            ),
+            periodic=is_periodic,
+            box_vectors_A=_bv,
         )
         amber_export_done = True
 

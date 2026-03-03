@@ -99,6 +99,8 @@ def build_tleap_script(
     model_name: str = "model",
     prmtop_name: str = "model.prmtop",
     inpcrd_name: str = "model.inpcrd",
+    periodic: bool = False,
+    box_vectors_A: tuple[float, float, float] | None = None,
 ) -> str:
     """Generate a tleap input script for residue-aware assembly.
 
@@ -106,7 +108,8 @@ def build_tleap_script(
     1. Sources GLYCAM06j for backbone residues.
     2. Optionally loads GAFF2 selector library/frcmod.
     3. Assembles the polymer chain from residue codes.
-    4. Saves prmtop/inpcrd.
+    4. Optionally defines a periodic head-to-tail bond and box.
+    5. Saves prmtop/inpcrd.
     """
     lines: List[str] = [
         "# poly_csp residue-aware GLYCAM06 + GAFF2 assembly",
@@ -123,6 +126,15 @@ def build_tleap_script(
     seq = build_glycam_sequence(polymer, dp)
     seq_str = " ".join(f"{{ {res} }}" for res in seq)
     lines.append(f"mol = sequence {{ {seq_str} }}")
+
+    if periodic and dp > 1:
+        # Create head-to-tail bond across the periodic boundary.
+        # tleap uses 1-based residue indexing.
+        lines.append(f"bond mol.1.C1 mol.{dp}.O4")
+
+    if periodic and box_vectors_A is not None:
+        Lx, Ly, Lz = box_vectors_A
+        lines.append(f"setBox mol centers {{ {Lx:.4f} {Ly:.4f} {Lz:.4f} }}")
 
     lines.extend([
         f"saveamberparm mol {prmtop_name} {inpcrd_name}",

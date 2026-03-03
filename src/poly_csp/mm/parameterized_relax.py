@@ -30,7 +30,9 @@ def _resolve_amber_paths(amber_summary: Dict[str, object]) -> tuple[Path, Path]:
             "Parameterized relaxation requires AmberTools parameterized artifacts "
             "(amber_summary.parameterized=true)."
         )
-    if str(amber_summary.get("parameter_backend", "")).strip().lower() != "ambertools":
+    if str(amber_summary.get("parameter_backend", "")).strip().lower() not in (
+        "ambertools", "residue_aware",
+    ):
         raise RuntimeError(
             "Parameterized relaxation requires amber_summary.parameter_backend='ambertools'."
         )
@@ -109,7 +111,27 @@ def run_parameterized_relaxation(
 
     prmtop_path, inpcrd_path = _resolve_amber_paths(amber_summary)
     structure = pmd.load_file(str(prmtop_path), str(inpcrd_path))
-    system = structure.createSystem(nonbondedMethod=mm.NoCutoff, constraints=None)
+
+    # Detect periodic box vectors from the AMBER summary.
+    box_A = amber_summary.get("box_vectors_A")
+    is_periodic = bool(amber_summary.get("periodic", False)) and box_A is not None
+
+    if is_periodic:
+        from openmm import app as mmapp, Vec3
+        system = structure.createSystem(
+            nonbondedMethod=mmapp.PME,
+            nonbondedCutoff=1.0 * unit.nanometer,
+            constraints=None,
+        )
+        Lx, Ly, Lz = [float(v) / 10.0 for v in box_A]  # Å → nm
+        system.setDefaultPeriodicBoxVectors(
+            Vec3(Lx, 0.0, 0.0) * unit.nanometer,
+            Vec3(0.0, Ly, 0.0) * unit.nanometer,
+            Vec3(0.0, 0.0, Lz) * unit.nanometer,
+        )
+    else:
+        system = structure.createSystem(nonbondedMethod=mm.NoCutoff, constraints=None)
+
     if structure.positions is None:
         raise RuntimeError("Amber structure does not contain positions.")
 

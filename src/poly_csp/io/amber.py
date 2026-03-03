@@ -288,6 +288,8 @@ def export_amber_artifacts(
     polymer: str = "amylose",
     dp: int | None = None,
     selector_mol: Chem.Mol | None = None,
+    periodic: bool = False,
+    box_vectors_A: tuple[float, float, float] | None = None,
 ) -> Dict[str, object]:
     """
     Export AMBER artifacts using the requested backend.
@@ -328,6 +330,8 @@ def export_amber_artifacts(
             polymer=polymer,
             dp=dp,
             selector_mol=selector_mol,
+            periodic=periodic,
+            box_vectors_A=box_vectors_A,
         )
 
     return _export_ambertools(
@@ -348,6 +352,8 @@ def _export_residue_aware(
     polymer: str,
     dp: int | None,
     selector_mol: Chem.Mol | None,
+    periodic: bool = False,
+    box_vectors_A: tuple[float, float, float] | None = None,
 ) -> Dict[str, object]:
     """Assemble AMBER topology using GLYCAM06 backbone + GAFF2 selectors."""
     from poly_csp.io.glycam_assembly import (
@@ -389,6 +395,8 @@ def _export_residue_aware(
         selector_lib_path=selector_lib_path,
         selector_frcmod_path=selector_frcmod_path,
         model_name=model_name,
+        periodic=periodic,
+        box_vectors_A=box_vectors_A,
     )
     assembly_result = run_tleap_assembly(
         tleap_script=script,
@@ -415,7 +423,10 @@ def _export_residue_aware(
             "Assembled with GLYCAM06j backbone + GAFF2 selectors.",
             "Charges derived per fragment and replicated for symmetry.",
         ],
+        "periodic": bool(periodic),
     }
+    if box_vectors_A is not None:
+        summary["box_vectors_A"] = list(box_vectors_A)
     if selector_lib_path:
         summary["files"]["selector_lib"] = selector_lib_path  # type: ignore[index]
         summary["files"]["selector_frcmod"] = selector_frcmod_path  # type: ignore[index]

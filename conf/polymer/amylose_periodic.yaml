@@ -1,0 +1,5 @@
+kind: amylose
+dp: 4          # One helical repeat (4/3 helix → 4 residues)
+monomer_representation: anhydro
+end_mode: periodic
+end_caps: {}
