@@ -24,9 +24,22 @@ def _assign_pdb_info(mol: Chem.Mol) -> None:
             for label, atom_idx in mapping.items():
                 residue_for_atom[int(atom_idx)] = res_idx
 
+    backbone_label_for_atom: Dict[int, str] = {}
+    if mol.HasProp("_poly_csp_residue_label_map_json"):
+        maps = json.loads(mol.GetProp("_poly_csp_residue_label_map_json"))
+        for mapping in maps:
+            for label, atom_idx in mapping.items():
+                backbone_label_for_atom[int(atom_idx)] = str(label)
+
     for atom in mol.GetAtoms():
         idx = atom.GetIdx()
+        parent_idx = (
+            int(atom.GetIntProp("_poly_csp_parent_heavy_idx"))
+            if atom.HasProp("_poly_csp_parent_heavy_idx")
+            else idx
+        )
         is_selector = atom.HasProp("_poly_csp_selector_instance")
+        is_hydrogen = atom.GetAtomicNum() == 1
 
         if is_selector:
             res_name = "SEL"
@@ -36,25 +49,26 @@ def _assign_pdb_info(mol: Chem.Mol) -> None:
                 if atom.HasProp("_poly_csp_residue_index")
                 else 0
             )
-            local_idx = (
-                int(atom.GetIntProp("_poly_csp_selector_local_idx"))
-                if atom.HasProp("_poly_csp_selector_local_idx")
-                else idx
+            parent_atom = mol.GetAtomWithIdx(parent_idx)
+            local_idx = idx
+            if is_hydrogen and parent_atom.HasProp("_poly_csp_selector_local_idx"):
+                local_idx = int(parent_atom.GetIntProp("_poly_csp_selector_local_idx"))
+            elif atom.HasProp("_poly_csp_selector_local_idx"):
+                local_idx = int(atom.GetIntProp("_poly_csp_selector_local_idx"))
+            atom_name = (
+                f"H{local_idx}"
+                if is_hydrogen
+                else f"{atom.GetSymbol()}{local_idx}"
             )
-            atom_name = f"{atom.GetSymbol()}{local_idx}"
         else:
             res_name = "GLC"
             chain_id = "A"
-            res_idx = residue_for_atom.get(idx, 0)
+            res_idx = residue_for_atom.get(parent_idx, 0)
             # Try to get atom label from the residue label maps
             atom_name = atom.GetSymbol() + str(idx)
-            if mol.HasProp("_poly_csp_residue_label_map_json"):
-                maps = json.loads(mol.GetProp("_poly_csp_residue_label_map_json"))
-                if res_idx < len(maps):
-                    for label, a_idx in maps[res_idx].items():
-                        if int(a_idx) == idx:
-                            atom_name = label
-                            break
+            parent_label = backbone_label_for_atom.get(parent_idx)
+            if parent_label is not None:
+                atom_name = f"H{parent_label}" if is_hydrogen else parent_label
 
         # Format atom name: PDB convention is 4 chars, left-justified for
         # 2-char element symbols, otherwise right-padded.
@@ -85,8 +99,12 @@ def write_pdb_from_rdkit(mol: Chem.Mol, path: str | Path) -> None:
     has_metadata = (
         out.HasProp("_poly_csp_residue_label_map_json")
         or any(a.HasProp("_poly_csp_selector_instance") for a in out.GetAtoms())
+        or any(a.HasProp("_poly_csp_parent_heavy_idx") for a in out.GetAtoms())
     )
-    if has_metadata:
+    has_existing_pdb_info = all(
+        atom.GetPDBResidueInfo() is not None for atom in out.GetAtoms()
+    )
+    if has_metadata and not has_existing_pdb_info:
         _assign_pdb_info(out)
 
     pdb = Chem.MolToPDBBlock(out)

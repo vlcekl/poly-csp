@@ -7,7 +7,7 @@ from poly_csp.topology.selectors import SelectorTemplate
 
 
 _DMPC_35_MAPPED_SMILES = (
-    "[*:1][C:2](=[O:3])[N:4][c:5]1[cH:6][c:7]([CH3:8])[cH:9][c:10]([CH3:11])[cH:12]1"
+    "[*:1][C:2](=[O:3])[NH:4][c:5]1[cH:6][c:7]([CH3:8])[cH:9][c:10]([CH3:11])[cH:12]1"
 )
 
 

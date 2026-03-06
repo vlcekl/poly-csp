@@ -21,23 +21,23 @@ class GlucoseMonomerTemplate:
 
 
 _AMYLOSE_ALPHA_ANHYDRO_MAPPED_SMILES = (
-    "[C@@H:1]1[C@H:2]([O:8])[C@@H:3]([O:9])[C@H:4]([O:10])"
-    "[C@@H:5]([CH2:6][O:11])[O:7]1"
+    "[C@@H:1]1[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
+    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
 )
 
 _CELLULOSE_BETA_ANHYDRO_MAPPED_SMILES = (
-    "[C@H:1]1[C@H:2]([O:8])[C@@H:3]([O:9])[C@H:4]([O:10])"
-    "[C@@H:5]([CH2:6][O:11])[O:7]1"
+    "[C@H:1]1[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
+    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
 )
 
 _AMYLOSE_ALPHA_NATURAL_MAPPED_SMILES = (
-    "[C@@H:1]1([O:12])[C@H:2]([O:8])[C@@H:3]([O:9])[C@H:4]([O:10])"
-    "[C@@H:5]([CH2:6][O:11])[O:7]1"
+    "[C@@H:1]1([OH:12])[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
+    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
 )
 
 _CELLULOSE_BETA_NATURAL_MAPPED_SMILES = (
-    "[C@H:1]1([O:12])[C@H:2]([O:8])[C@@H:3]([O:9])[C@H:4]([O:10])"
-    "[C@@H:5]([CH2:6][O:11])[O:7]1"
+    "[C@H:1]1([OH:12])[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
+    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
 )
 
 _MAPNUM_TO_LABEL_ANHYDRO = {
@@ -58,6 +58,39 @@ _MAPNUM_TO_LABEL_NATURAL = {
     **_MAPNUM_TO_LABEL_ANHYDRO,
     12: "O1",
 }
+
+_HYDROXYL_MAPNUMS_ANHYDRO = frozenset((8, 9, 10, 11))
+_HYDROXYL_MAPNUMS_NATURAL = frozenset((8, 9, 10, 11, 12))
+
+
+def _hydroxyl_mapnums(
+    representation: MonomerRepresentation,
+) -> frozenset[int]:
+    return (
+        _HYDROXYL_MAPNUMS_ANHYDRO
+        if representation == "anhydro"
+        else _HYDROXYL_MAPNUMS_NATURAL
+    )
+
+
+def _restore_implicit_hydroxyl_hydrogens(
+    mol: Chem.Mol,
+    representation: MonomerRepresentation,
+) -> Chem.Mol:
+    """Convert parsed [OH] atoms into implicit-H hydroxyl oxygens."""
+    out = Chem.Mol(mol)
+    for atom in out.GetAtoms():
+        if atom.GetAtomMapNum() not in _hydroxyl_mapnums(representation):
+            continue
+        if atom.GetAtomicNum() != 8:
+            raise ValueError(
+                f"Mapped hydroxyl atom {atom.GetAtomMapNum()} is not oxygen."
+            )
+        atom.SetNoImplicit(False)
+        atom.SetNumExplicitHs(0)
+        atom.UpdatePropertyCache(strict=False)
+    Chem.SanitizeMol(out)
+    return out
 
 
 def _embed_mol_deterministic(mol: Chem.Mol, seed: int) -> Chem.Mol:
@@ -109,6 +142,7 @@ def _make_mol_from_polymer(
             f"Could not parse mapped SMILES for {polymer}/{representation}."
         )
     Chem.SanitizeMol(mol)
+    mol = _restore_implicit_hydroxyl_hydrogens(mol, representation)
     return _embed_mol_deterministic(mol, seed=seed)
 
 

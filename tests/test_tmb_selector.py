@@ -38,6 +38,9 @@ def test_tmb_template_structure() -> None:
     assert len(tmb.donors) == 0
     assert len(tmb.acceptors) == 1
     assert set(tmb.connector_local_roles.values()) == {"carbonyl_c", "carbonyl_o"}
+    for atom_idx in tmb.connector_local_roles:
+        atom = tmb.mol.GetAtomWithIdx(atom_idx)
+        assert atom.GetTotalNumHs(includeNeighbors=True) == 0
 
 
 def test_tmb_attach_at_c6() -> None:

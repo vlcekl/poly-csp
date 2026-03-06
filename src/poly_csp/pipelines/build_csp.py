@@ -24,6 +24,7 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
+from poly_csp.structure.hydrogens import complete_with_hydrogens
 from poly_csp.structure.build_helix import build_backbone_coords
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.backbone import assign_conformer, polymerize
@@ -126,6 +127,8 @@ class BuildReport:
     amber_enabled: bool
     amber_summary: dict[str, object]
     output_export_formats: List[str]
+    final_structure_variant: str
+    heavy_debug_written: bool
     multi_opt_enabled: bool = False
     multi_opt_rank: int = 0
     multi_opt_total_starts: int = 0
@@ -287,6 +290,44 @@ def _finite_or_none(value: float) -> Optional[float]:
     return float(value) if np.isfinite(value) else None
 
 
+def _hydrogen_handling_cfg(cfg: DictConfig) -> dict[str, object]:
+    relax_cfg = (
+        cfg.forcefield.options
+        if "forcefield" in cfg
+        and cfg.forcefield is not None
+        and "options" in cfg.forcefield
+        and cfg.forcefield.options is not None
+        else {}
+    )
+    payload = (
+        relax_cfg.hydrogen_handling
+        if hasattr(relax_cfg, "hydrogen_handling")
+        and relax_cfg.hydrogen_handling is not None
+        else {}
+    )
+    return {
+        "master_mode": str(payload.master_mode) if "master_mode" in payload else "implicit",
+        "parameterize_explicit_hydrogens": bool(
+            payload.parameterize_explicit_hydrogens
+            if "parameterize_explicit_hydrogens" in payload
+            else True
+        ),
+        "final_structure_mode": str(
+            payload.final_structure_mode if "final_structure_mode" in payload else "all_atom"
+        ),
+        "optimize_added_hydrogens": bool(
+            payload.optimize_added_hydrogens
+            if "optimize_added_hydrogens" in payload
+            else True
+        ),
+        "strict_exchangeable_site_validation": bool(
+            payload.strict_exchangeable_site_validation
+            if "strict_exchangeable_site_validation" in payload
+            else True
+        ),
+    }
+
+
 @hydra.main(config_path="../../../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     print("=== poly_csp build_csp ===")
@@ -313,6 +354,17 @@ def main(cfg: DictConfig) -> None:
         [str(x).strip().lower() for x in cfg.output.export_formats]
         if "output" in cfg and "export_formats" in cfg.output
         else ["pdb"]
+    )
+    hydrogen_handling = _hydrogen_handling_cfg(cfg)
+    final_structure_variant = (
+        str(cfg.output.final_structure_variant)
+        if "output" in cfg and "final_structure_variant" in cfg.output
+        else str(hydrogen_handling["final_structure_mode"])
+    ).strip().lower()
+    write_heavy_debug = bool(
+        "output" in cfg
+        and "write_heavy_debug" in cfg.output
+        and cfg.output.write_heavy_debug
     )
     amber_cfg_enabled = bool(
         "amber" in cfg and cfg.amber is not None and "enabled" in cfg.amber and cfg.amber.enabled
@@ -496,7 +548,7 @@ def main(cfg: DictConfig) -> None:
     amber_export_done = False
 
     # ---- Stage 4b: AMBER export (needed before relaxation for prmtop). ---
-    if relax_requested or amber_cfg_enabled:
+    if amber_cfg_enabled:
         from poly_csp.structure.pbc import get_box_vectors_A as _get_bv_relax
         _bv_relax = _get_bv_relax(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
@@ -675,6 +727,17 @@ def main(cfg: DictConfig) -> None:
         )
         amber_export_done = True
 
+    final_mol = (
+        complete_with_hydrogens(
+            mol_poly,
+            add_coords=True,
+            optimize="h_only" if bool(hydrogen_handling["optimize_added_hydrogens"]) else "none",
+        )
+        if final_structure_variant == "all_atom"
+        else mol_poly
+    )
+    heavy_debug_written = bool(write_heavy_debug and final_structure_variant == "all_atom")
+
     report = BuildReport(
         polymer=str(backbone.polymer),
         dp=int(backbone.dp),
@@ -710,6 +773,8 @@ def main(cfg: DictConfig) -> None:
         amber_enabled=bool(amber_enabled),
         amber_summary=amber_summary,
         output_export_formats=output_export_formats,
+        final_structure_variant=final_structure_variant,
+        heavy_debug_written=heavy_debug_written,
         multi_opt_enabled=bool(ranked_results is not None and len(ranked_results) > 0),
         multi_opt_rank=1 if ranked_results else 0,
         multi_opt_total_starts=len(ranked_results) if ranked_results else 0,
@@ -722,11 +787,18 @@ def main(cfg: DictConfig) -> None:
     cfg_path = outdir / "resolved_config.yaml"
 
     if "pdb" in output_export_formats:
-        write_pdb_from_rdkit(mol_poly, pdb_path)
+        write_pdb_from_rdkit(final_mol, pdb_path)
 
     sdf_path = outdir / "model.sdf"
     if "sdf" in output_export_formats:
-        write_sdf(mol_poly, sdf_path)
+        write_sdf(final_mol, sdf_path)
+
+    heavy_pdb_path = outdir / "model_heavy.pdb"
+    heavy_sdf_path = outdir / "model_heavy.sdf"
+    if heavy_debug_written and "pdb" in output_export_formats:
+        write_pdb_from_rdkit(mol_poly, heavy_pdb_path)
+    if heavy_debug_written and "sdf" in output_export_formats:
+        write_sdf(mol_poly, heavy_sdf_path)
 
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(asdict(report), handle, indent=2)
@@ -739,6 +811,10 @@ def main(cfg: DictConfig) -> None:
         wrote_lines.append(f"  {pdb_path}")
     if "sdf" in output_export_formats:
         wrote_lines.append(f"  {sdf_path}")
+    if heavy_debug_written and "pdb" in output_export_formats:
+        wrote_lines.append(f"  {heavy_pdb_path}")
+    if heavy_debug_written and "sdf" in output_export_formats:
+        wrote_lines.append(f"  {heavy_sdf_path}")
     wrote_lines.extend([f"  {json_path}", f"  {cfg_path}"])
     print("\nWrote:\n" + "\n".join(wrote_lines))
     if amber_enabled and "files" in amber_summary:
@@ -762,10 +838,23 @@ def main(cfg: DictConfig) -> None:
         ranking_entries = []
         for result in ranked_results:
             rank_dir = _ensure_outdir(outdir / f"ranked_{result.rank:03d}")
+            rank_final_mol = (
+                complete_with_hydrogens(
+                    result.mol,
+                    add_coords=True,
+                    optimize="h_only" if bool(hydrogen_handling["optimize_added_hydrogens"]) else "none",
+                )
+                if final_structure_variant == "all_atom"
+                else result.mol
+            )
             if "pdb" in output_export_formats:
-                write_pdb_from_rdkit(result.mol, rank_dir / "model.pdb")
+                write_pdb_from_rdkit(rank_final_mol, rank_dir / "model.pdb")
             if "sdf" in output_export_formats:
-                write_sdf(result.mol, rank_dir / "model.sdf")
+                write_sdf(rank_final_mol, rank_dir / "model.sdf")
+            if heavy_debug_written and "pdb" in output_export_formats:
+                write_pdb_from_rdkit(result.mol, rank_dir / "model_heavy.pdb")
+            if heavy_debug_written and "sdf" in output_export_formats:
+                write_sdf(result.mol, rank_dir / "model_heavy.sdf")
             rank_report = {
                 "rank": result.rank,
                 "score": result.score,

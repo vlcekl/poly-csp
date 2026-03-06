@@ -12,6 +12,8 @@ defaults:
 output:
   dir: outputs
   export_formats: [pdb, sdf, amber]
+  final_structure_variant: all_atom
+  write_heavy_debug: false
 
 amber:
   enabled: true

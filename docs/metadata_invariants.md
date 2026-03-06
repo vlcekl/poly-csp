@@ -70,6 +70,10 @@ dihedral application, atom mapping, and terminal/export stages.
   `amide_n`, etc.). Connector atoms keep selector instance metadata but must carry
   component tag `connector`.
 
+- `_poly_csp_parent_heavy_idx`:
+  Present on derived explicit-hydrogen atoms. Points to the hydrogen-suppressed
+  parent heavy atom so residue/component/selector metadata can be inherited.
+
 ## Invariants
 
 1. `_poly_csp_residue_label_map_json` must always refer to valid global atom indices in the current molecule.
@@ -78,3 +82,4 @@ dihedral application, atom mapping, and terminal/export stages.
 4. Metadata must be copied forward when creating a new `Chem.Mol` from edited `RWMol` objects.
 5. Component tagging must remain single-valued per atom (`backbone` xor `selector` xor `connector`).
 6. Connector atoms must retain `_poly_csp_selector_instance` and `_poly_csp_selector_local_idx` so they can be remapped from capped-fragment parameters back onto the full polymer.
+7. Hydrogen completion is a derived step: explicit H atoms inherit component/residue/selector metadata from their parent heavy atom and record `_poly_csp_parent_heavy_idx`.

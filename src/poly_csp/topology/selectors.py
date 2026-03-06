@@ -18,7 +18,7 @@ def infer_donor_acceptor_atoms(mol: Chem.Mol) -> tuple[tuple[int, ...], tuple[in
         z = atom.GetAtomicNum()
         charge = atom.GetFormalCharge()
         if z == 7:
-            has_h = any(nbr.GetAtomicNum() == 1 for nbr in atom.GetNeighbors())
+            has_h = atom.GetTotalNumHs(includeNeighbors=True) > 0
             if has_h and charge <= 0:
                 donors.append(idx)
             if charge <= 0 and not atom.GetIsAromatic():

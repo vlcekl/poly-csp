@@ -85,6 +85,14 @@ class MixingRules(BaseModel):
     )
 
 
+class HydrogenHandlingConfig(BaseModel):
+    master_mode: Literal["implicit"] = "implicit"
+    parameterize_explicit_hydrogens: bool = True
+    final_structure_mode: Literal["all_atom", "heavy_atom"] = "all_atom"
+    optimize_added_hydrogens: bool = True
+    strict_exchangeable_site_validation: bool = True
+
+
 class ForceFieldConfig(BaseModel):
     options: Dict[str, object] = Field(default_factory=dict)
     mixing_rules: MixingRules = Field(default_factory=MixingRules)

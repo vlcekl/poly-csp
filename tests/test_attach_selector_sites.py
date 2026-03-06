@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from poly_csp.structure.build_helix import build_backbone_coords
@@ -98,3 +100,41 @@ def test_attach_selector_all_sites_all_residues_increases_atom_count() -> None:
     added_per_selector = selector.mol.GetNumAtoms() - 1
     assert mol.GetNumAtoms() == n_before + dp * 3 * added_per_selector
     assert mol.GetNumConformers() == 1
+
+
+def test_attach_selector_consumes_site_oh_and_preserves_carbamate_nh() -> None:
+    template = make_glucose_template("amylose", monomer_representation="natural_oh")
+    selector = make_35_dmpc_template()
+
+    dp = 2
+    coords = build_backbone_coords(template, _helix(), dp)
+    mol = polymerize(template=template, dp=dp, linkage="1-4", anomer="alpha")
+    removed = json.loads(mol.GetProp("_poly_csp_removed_old_indices_json"))
+    if removed:
+        keep_mask = np.ones((coords.shape[0],), dtype=bool)
+        keep_mask[np.asarray(removed, dtype=int)] = False
+        coords = coords[keep_mask]
+    mol = assign_conformer(mol, coords)
+
+    o6_global = residue_atom_global_index(
+        residue_index=0,
+        monomer_atom_count=template.mol.GetNumAtoms(),
+        local_atom_index=template.site_idx["O6"],
+    )
+    assert mol.GetAtomWithIdx(o6_global).GetTotalNumHs(includeNeighbors=True) == 1
+
+    mol = attach_selector(
+        mol_polymer=mol,
+        template=template,
+        residue_index=0,
+        site="C6",
+        selector=selector,
+    )
+
+    assert mol.GetAtomWithIdx(o6_global).GetTotalNumHs(includeNeighbors=True) == 0
+    amide_n = next(
+        atom for atom in mol.GetAtoms()
+        if atom.HasProp("_poly_csp_connector_role")
+        and atom.GetProp("_poly_csp_connector_role") == "amide_n"
+    )
+    assert amide_n.GetTotalNumHs(includeNeighbors=True) == 1

@@ -32,3 +32,12 @@ def test_make_35_dmpc_template_attach_atom_is_carbonyl_c() -> None:
         if nbr.GetAtomicNum() == 8 and bond.GetBondType() == Chem.BondType.DOUBLE:
             has_double_o = True
     assert has_double_o
+
+
+def test_make_35_dmpc_template_tracks_carbamate_nh() -> None:
+    tpl = make_35_dmpc_template()
+    amide_idx = next(
+        idx for idx, role in tpl.connector_local_roles.items() if role == "amide_n"
+    )
+    amide_n = tpl.mol.GetAtomWithIdx(amide_idx)
+    assert amide_n.GetTotalNumHs(includeNeighbors=True) == 1

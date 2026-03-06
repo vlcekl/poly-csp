@@ -97,7 +97,7 @@ def test_build_linkage_frcmod(tmp_path) -> None:
 
 
 def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path) -> None:
-    """Dummy atoms in the selector mol should be replaced with H before PDB write."""
+    """Selector fragment inputs should be hydrogen-complete before PDB write."""
     from rdkit import Chem
     from rdkit.Chem import AllChem
     from poly_csp.forcefield import glycam as glycam_assembly
@@ -134,8 +134,11 @@ def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path
     written = written_mols[0]
     # No dummy atoms should remain in the molecule written to PDB
     assert all(a.GetAtomicNum() > 0 for a in written.GetAtoms())
+    # Hydrogen completion should occur before parameterization.
+    assert any(a.GetAtomicNum() == 1 for a in written.GetAtoms())
+    amide_n = next(a for a in written.GetAtoms() if a.GetAtomicNum() == 7)
+    assert any(nbr.GetAtomicNum() == 1 for nbr in amide_n.GetNeighbors())
     # All paths should be absolute (Bug 3 regression check).
     from pathlib import Path
     for key in ("mol2", "frcmod", "lib"):
         assert Path(result[key]).is_absolute(), f"{key} path is not absolute: {result[key]}"
-

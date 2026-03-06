@@ -56,6 +56,51 @@ def _annotate_selector_atoms(
             atom.SetProp("_poly_csp_component", "selector")
 
 
+def _selector_instance_local_to_global(
+    mol: Chem.Mol,
+    instance_id: int,
+) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    for atom in mol.GetAtoms():
+        if not atom.HasProp("_poly_csp_selector_instance"):
+            continue
+        if int(atom.GetIntProp("_poly_csp_selector_instance")) != instance_id:
+            continue
+        if not atom.HasProp("_poly_csp_selector_local_idx"):
+            continue
+        mapping[int(atom.GetIntProp("_poly_csp_selector_local_idx"))] = atom.GetIdx()
+    return mapping
+
+
+def _validate_attachment_hydrogen_counts(
+    mol: Chem.Mol,
+    sugar_o_global: int,
+    selector: SelectorTemplate,
+    instance_id: int,
+) -> None:
+    sugar_o = mol.GetAtomWithIdx(int(sugar_o_global))
+    if sugar_o.GetTotalNumHs(includeNeighbors=True) != 0:
+        raise ValueError(
+            "Selector attachment left a hydrogen on the sugar attachment oxygen."
+        )
+
+    if not selector.connector_local_roles:
+        return
+
+    local_to_global = _selector_instance_local_to_global(mol, instance_id)
+    for local_idx, role in selector.connector_local_roles.items():
+        if role != "amide_n":
+            continue
+        atom_idx = local_to_global.get(int(local_idx))
+        if atom_idx is None:
+            raise ValueError("Attached selector is missing the connector amide nitrogen.")
+        amide_n = mol.GetAtomWithIdx(int(atom_idx))
+        if amide_n.GetTotalNumHs(includeNeighbors=True) != 1:
+            raise ValueError(
+                "Selector attachment did not preserve the carbamate NH hydrogen count."
+            )
+
+
 def residue_label_global_index(mol: Chem.Mol, residue_index: int, label: str) -> int:
     maps = residue_label_maps(mol)
     if residue_index < 0 or residue_index >= len(maps):
@@ -134,6 +179,12 @@ def attach_selector(
     Chem.SanitizeMol(mol)
     copy_mol_props(mol_polymer, mol)
     mol.SetIntProp("_poly_csp_selector_count", instance_id)
+    _validate_attachment_hydrogen_counts(
+        mol=mol,
+        sugar_o_global=sugar_o_global,
+        selector=selector,
+        instance_id=instance_id,
+    )
 
     if not place_coords:
         # Topology-only mode: strip coordinates so downstream geometry assembly

@@ -15,6 +15,7 @@ from poly_csp.topology.atom_mapping import selector_instance_maps
 from poly_csp.topology.selectors import SelectorTemplate
 from poly_csp.structure.dihedrals import measure_dihedral_rad
 from poly_csp.forcefield.anneal import run_heat_cool_cycle, run_temperature_ramp
+from poly_csp.forcefield.gaff import parameterize_isolated_selector
 from poly_csp.forcefield.system_builder import create_system
 from poly_csp.forcefield.restraints import (
     add_dihedral_restraints,
@@ -185,6 +186,19 @@ def _connector_params_by_site(
     return params_by_site or None
 
 
+def _selector_prmtop_path(
+    selector: SelectorTemplate | None,
+    selector_prmtop_path: str | None,
+) -> str | None:
+    if selector is None:
+        return None
+    if selector_prmtop_path is not None:
+        return selector_prmtop_path
+
+    artifacts = parameterize_isolated_selector(selector_template=selector)
+    return str(artifacts["prmtop"])
+
+
 def _update_rdkit_coords(mol: Chem.Mol, positions_nm: unit.Quantity) -> Chem.Mol:
     xyz_A = positions_nm.value_in_unit(unit.nanometer) * 10.0
     out = Chem.Mol(mol)
@@ -239,6 +253,7 @@ def _run_hybrid_pre_relax(
     backbone_heavy = _backbone_heavy_indices(mol)
     backbone_all = _backbone_all_indices(mol)
     selector_indices = _selector_all_indices(mol)
+    selector_prmtop_path = _selector_prmtop_path(selector, selector_prmtop_path)
 
     use_gaff2 = selector_prmtop_path is not None and selector is not None and len(selector_indices) > 0
     gaff_params = None

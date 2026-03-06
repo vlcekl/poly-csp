@@ -36,6 +36,23 @@ def test_make_glucose_template_natural_oh_has_o1() -> None:
     assert template.representation == "natural_oh"
 
 
+def test_make_glucose_template_tracks_exchangeable_hydrogens() -> None:
+    template = make_glucose_template("amylose", monomer_representation="natural_oh")
+    for label in ("O1", "O2", "O3", "O4", "O6"):
+        atom = template.mol.GetAtomWithIdx(template.atom_idx[label])
+        assert atom.GetTotalNumHs(includeNeighbors=True) == 1
+
+    ring_o = template.mol.GetAtomWithIdx(template.atom_idx["O5"])
+    assert ring_o.GetTotalNumHs(includeNeighbors=True) == 0
+
+
+def test_make_glucose_template_anhydro_free_hydroxyls_keep_total_hydrogens() -> None:
+    template = make_glucose_template("amylose", monomer_representation="anhydro")
+    for label in ("O2", "O3", "O4", "O6"):
+        atom = template.mol.GetAtomWithIdx(template.atom_idx[label])
+        assert atom.GetTotalNumHs(includeNeighbors=True) == 1
+
+
 def test_amylose_template_has_defined_ring_stereo() -> None:
     template = make_glucose_template("amylose")
     for label in ("C2", "C3", "C4", "C5"):
