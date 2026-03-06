@@ -96,6 +96,7 @@ def build_tleap_script(
     dp: int,
     selector_lib_path: str | None = None,
     selector_frcmod_path: str | None = None,
+    linkage_frcmod_path: str | None = None,
     model_name: str = "model",
     prmtop_name: str = "model.prmtop",
     inpcrd_name: str = "model.inpcrd",
@@ -122,9 +123,11 @@ def build_tleap_script(
         lines.append(f"loadamberparams {selector_frcmod_path}")
     if selector_lib_path:
         lines.append(f"loadoff {selector_lib_path}")
+    if linkage_frcmod_path:
+        lines.append(f"loadamberparams {linkage_frcmod_path}")
 
     seq = build_glycam_sequence(polymer, dp)
-    seq_str = " ".join(f"{{ {res} }}" for res in seq)
+    seq_str = " ".join(seq)
     lines.append(f"mol = sequence {{ {seq_str} }}")
 
     if periodic and dp > 1:
@@ -192,6 +195,53 @@ def run_tleap_assembly(
         "parameterized": True,
         "parameter_backend": "residue_aware",
     }
+
+
+def build_linkage_frcmod(outdir: Path, filename: str = "linkage.frcmod") -> Path:
+    """Generate a supplementary frcmod with zero-energy torsion placeholders.
+
+    GLYCAM06j does not parameterize torsions across the periodic 0GA–4GA
+    boundary (e.g. H2-Cg-Cg-H2).  These zero-barrier terms let tleap
+    complete cleanly; for production MD they should be replaced with
+    QM-fitted values.
+    """
+    # Missing torsions reported by tleap for 1→4 periodic linkage.
+    missing_torsions = [
+        "H2-Cg-Cg-H2",
+        "H2-Cg-Cg-H1",
+        "H1-Cg-Cg-H1",
+        "H2-Cg-Cg-Oh",
+        "H1-Cg-Cg-Oh",
+        "Oh-Cg-Cg-Oh",
+        "H2-Cg-Cg-Os",
+        "H1-Cg-Cg-Os",
+        "Oh-Cg-Cg-Os",
+        "Os-Cg-Cg-Os",
+        "Cg-Cg-Cg-H2",
+        "Cg-Cg-Cg-H1",
+        "Cg-Cg-Cg-Oh",
+        "Cg-Cg-Cg-Os",
+        "Cg-Cg-Cg-Cg",
+    ]
+    lines = [
+        "Supplementary frcmod for periodic glycosidic linkage (poly_csp)",
+        "MASS",
+        "",
+        "BOND",
+        "",
+        "ANGLE",
+        "",
+        "DIHE",
+    ]
+    for torsion in missing_torsions:
+        # 1 term, 0.0 barrier, 0.0 phase, periodicity 3.0
+        lines.append(f"{torsion}   1    0.000         0.0             3.0")
+    lines.extend(["", "IMPROPER", "", "NONBON", "", ""])
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    frcmod_path = outdir / filename
+    frcmod_path.write_text("\n".join(lines), encoding="utf-8")
+    return frcmod_path
 
 
 def parameterize_selector_fragment(
@@ -273,7 +323,160 @@ def parameterize_selector_fragment(
     )
 
     return {
-        "mol2": str(mol2_path),
-        "frcmod": str(frcmod_path),
-        "lib": str(lib_path),
+        "mol2": str(mol2_path.resolve()),
+        "frcmod": str(frcmod_path.resolve()),
+        "lib": str(lib_path.resolve()),
     }
+
+
+def build_selector_prmtop(
+    mol2_path: str | Path,
+    frcmod_path: str | Path,
+    work_dir: Path | None = None,
+) -> str:
+    """Create a standalone AMBER prmtop for the selector fragment.
+
+    Uses tleap to load the GAFF2 mol2 and frcmod produced by
+    ``parameterize_selector_fragment`` and save a prmtop/inpcrd pair.
+    The resulting prmtop can be loaded by OpenMM to extract bonded forces.
+
+    The mol2 file produced by antechamber sometimes contains duplicate bonds
+    (especially for aromatic systems).  This function deduplicates them
+    before feeding the file to tleap.
+
+    Parameters
+    ----------
+    mol2_path
+        Path to the selector mol2 file (GAFF2 atom types + charges).
+    frcmod_path
+        Path to the selector frcmod file (additional parameters).
+    work_dir
+        Working directory for tleap output.  Defaults to the parent
+        directory of the mol2 file.
+
+    Returns
+    -------
+    Absolute path to the generated prmtop file.
+    """
+    mol2_path = Path(mol2_path)
+    frcmod_path = Path(frcmod_path)
+
+    if work_dir is None:
+        work_dir = mol2_path.parent
+    else:
+        work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    clean_mol2 = work_dir / "selector_clean.mol2"
+    _deduplicate_mol2_bonds(mol2_path, clean_mol2)
+
+    prmtop_path = work_dir / "selector.prmtop"
+    inpcrd_path = work_dir / "selector.inpcrd"
+
+    script = "\n".join([
+        "source leaprc.gaff2",
+        f"loadamberparams {frcmod_path.resolve()}",
+        f"sel = loadmol2 {clean_mol2.resolve()}",
+        f"saveamberparm sel {prmtop_path.name} {inpcrd_path.name}",
+        "quit",
+    ]) + "\n"
+
+    script_path = work_dir / "build_prmtop.in"
+    script_path.write_text(script, encoding="utf-8")
+
+    _run_command(
+        ["tleap", "-f", script_path.name],
+        cwd=work_dir,
+        log_path=work_dir / "build_prmtop.log",
+    )
+
+    if not prmtop_path.exists() or prmtop_path.stat().st_size == 0:
+        raise RuntimeError(
+            f"tleap failed to generate selector prmtop. "
+            f"See: {work_dir / 'build_prmtop.log'}"
+        )
+
+    return str(prmtop_path.resolve())
+
+
+def _deduplicate_mol2_bonds(src: Path, dst: Path) -> None:
+    """Remove duplicate bonds from an AMBER mol2 file.
+
+    Antechamber sometimes writes duplicate bond records for aromatic systems.
+    This reads the mol2, deduplicates bond pairs, renumbers, and writes clean output.
+    """
+    lines = src.read_text(encoding="utf-8").splitlines(keepends=True)
+    out_lines: list[str] = []
+    in_bond_section = False
+    past_bond_section = False
+    bond_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "@<TRIPOS>BOND":
+            in_bond_section = True
+            out_lines.append(line)
+            continue
+        if in_bond_section and stripped.startswith("@<TRIPOS>"):
+            # End of bond section — process and flush.
+            in_bond_section = False
+            past_bond_section = True
+            _flush_dedup_bonds(bond_lines, out_lines)
+            out_lines.append(line)
+            continue
+        if in_bond_section:
+            bond_lines.append(line)
+        else:
+            out_lines.append(line)
+
+    # If the file ends right after the bond section (no further sections).
+    if in_bond_section and not past_bond_section:
+        _flush_dedup_bonds(bond_lines, out_lines)
+
+    # Fix the atom/bond counts in the MOLECULE header.
+    _fix_mol2_bond_count(out_lines, bond_lines)
+
+    dst.write_text("".join(out_lines), encoding="utf-8")
+
+
+def _flush_dedup_bonds(bond_lines: list[str], out_lines: list[str]) -> None:
+    """Deduplicate bond lines and append to out_lines with renumbered IDs."""
+    seen: set[tuple[int, int]] = set()
+    deduped: list[tuple[int, int, str]] = []
+    for raw_line in bond_lines:
+        parts = raw_line.split()
+        if len(parts) < 4:
+            continue
+        a, b = int(parts[1]), int(parts[2])
+        key = (min(a, b), max(a, b))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((a, b, parts[3]))
+
+    for idx, (a, b, btype) in enumerate(deduped, 1):
+        out_lines.append(f"     {idx:>2d}    {a:>2d}    {b:>2d} {btype}\n")
+
+    # Store deduped count for header fixup.
+    bond_lines.clear()
+    bond_lines.extend([f"{len(deduped)}"])  # stash the count
+
+
+def _fix_mol2_bond_count(lines: list[str], count_stash: list[str]) -> None:
+    """Fix the bond count in the @<TRIPOS>MOLECULE header."""
+    if not count_stash:
+        return
+    try:
+        new_count = int(count_stash[0])
+    except (ValueError, IndexError):
+        return
+
+    # The counts line is the 3rd line after @<TRIPOS>MOLECULE.
+    for i, line in enumerate(lines):
+        if line.strip() == "@<TRIPOS>MOLECULE":
+            # Line i+2 is the counts line: "  natom  nbond  ..."
+            if i + 2 < len(lines):
+                parts = lines[i + 2].split()
+                if len(parts) >= 2:
+                    parts[1] = str(new_count)
+                    lines[i + 2] = "   " + "    ".join(parts) + "\n"
+            break

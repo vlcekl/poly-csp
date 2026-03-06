@@ -28,6 +28,7 @@ def test_pipeline_capped_mode_runs_with_explicit_caps(tmp_path: Path) -> None:
     _run_build(
         "polymer.dp=3 selector.enabled=false polymer.end_mode=capped "
         "+polymer.end_caps.left=acetyl +polymer.end_caps.right=methoxy "
+        "relax.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
 
@@ -42,6 +43,7 @@ def test_pipeline_periodic_natural_oh_runs(tmp_path: Path) -> None:
     _run_build(
         "polymer.dp=3 selector.enabled=false "
         "polymer.monomer_representation=natural_oh polymer.end_mode=periodic "
+        "relax.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
 

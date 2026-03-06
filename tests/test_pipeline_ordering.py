@@ -20,6 +20,7 @@ def test_pipeline_ordering_enabled_writes_summary(tmp_path: Path) -> None:
         "polymer.dp=2 "
         "selector.enabled=true selector.sites=[C6] "
         "ordering.enabled=true ordering.max_candidates=8 "
+        "relax.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
     cmd = [sys.executable, "-m", "poly_csp.pipelines.build_csp", *shlex.split(overrides)]

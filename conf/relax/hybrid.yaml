@@ -1,5 +1,4 @@
 enabled: true
-mode: hybrid_pre_relax
 
 # Restrained relaxation controls
 positional_k: 5000.0
@@ -7,6 +6,7 @@ dihedral_k: 500.0
 hbond_k: 50.0
 n_stages: 3
 max_iterations: 200
+freeze_backbone: true
 
 # Temperature schedule
 anneal:

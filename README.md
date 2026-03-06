@@ -177,7 +177,7 @@ conf/
 ├── selector/
 │   └── dmpc_35.yaml
 └── relax/
-    └── restrained.yaml
+    └── hybrid.yaml
 ```
 
 ### Example `conf/config.yaml`
@@ -361,16 +361,17 @@ Each build produces:
 
 # Model Validity
 
-The project supports two distinct relaxation models:
+The project supports two relaxation modes:
 
-1. `geometry_pre_relax` (default):
+1. `geometry_pre_relax` (default fallback):
    - Soft-repulsion + restraint guided coordinate cleanup.
    - Useful for deterministic pre-organization and clash reduction.
    - Not a full physical force-field model.
 
-2. `ambertools_parameterized`:
-   - Uses AmberTools-generated `prmtop/inpcrd` artifacts for parameterized OpenMM minimization.
-   - Intended for physically grounded relaxation workflows.
+2. `hybrid_pre_relax` (recommended, default in `conf/relax/hybrid.yaml`):
+   - Uses AMBER bonded forces (from `prmtop`) + soft repulsion non-bonded.
+   - When the AMBER topology covers only a subset of the molecule (e.g., backbone only from `residue_aware` backend), falls back to generic RDKit-derived bonded forces (harmonic bonds and angles) that keep the molecule intact during annealing.
+   - Supports staged restraint release and Langevin annealing with heat/cool cycles.
 
 Use the mode explicitly via `relax.mode=...` and interpret outputs accordingly.
 
@@ -441,4 +442,4 @@ Used in chiral chromatography systems such as Chiralpak AD.
 
 # Status
 
-Deterministic construction workflow with selector attachment, ordering, QC, SDF export, multi-start optimization, and two relaxation modes (geometric pre-relax and AmberTools-parameterized).
+Deterministic construction workflow with selector attachment, ordering, QC, SDF export, multi-start optimization, and hybrid relaxation (AMBER bonded + soft repulsion, with RDKit-bonded fallback).

@@ -182,10 +182,12 @@ def _cfg_to_relax_spec(cfg: DictConfig):
         ),
         dihedral_k=float(relax_cfg.dihedral_k if "dihedral_k" in relax_cfg else 500.0),
         hbond_k=float(relax_cfg.hbond_k if "hbond_k" in relax_cfg else 50.0),
-        mode=str(relax_cfg.mode if "mode" in relax_cfg else "geometry_pre_relax"),
         n_stages=int(relax_cfg.n_stages if "n_stages" in relax_cfg else 3),
         max_iterations=int(
             relax_cfg.max_iterations if "max_iterations" in relax_cfg else 200
+        ),
+        freeze_backbone=bool(
+            relax_cfg.freeze_backbone if "freeze_backbone" in relax_cfg else True
         ),
         anneal_enabled=bool(anneal_cfg.enabled if "enabled" in anneal_cfg else False),
         t_start_K=float(anneal_cfg.t_start_K if "t_start_K" in anneal_cfg else 50.0),
@@ -314,11 +316,6 @@ def main(cfg: DictConfig) -> None:
         if "amber" in cfg and cfg.amber is not None and "charge_model" in cfg.amber
         else "bcc"
     )
-    amber_parameter_backend = (
-        str(cfg.amber.parameter_backend)
-        if "amber" in cfg and cfg.amber is not None and "parameter_backend" in cfg.amber
-        else "placeholder"
-    )
     amber_net_charge = (
         cfg.amber.net_charge
         if "amber" in cfg and cfg.amber is not None and "net_charge" in cfg.amber
@@ -354,32 +351,6 @@ def main(cfg: DictConfig) -> None:
         raise RuntimeError(
             "Relaxation requested but OpenMM modules are unavailable in this environment."
         )
-    relax_mode = (
-        str(relax_spec.mode)
-        if (relax_spec is not None and bool(relax_spec.enabled))
-        else "geometry_pre_relax"
-    )
-
-    if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax"):
-        if not amber_cfg_enabled:
-            raise RuntimeError(
-                f"relax.mode={relax_mode} requires amber.enabled=true."
-            )
-        backend_lower = amber_parameter_backend.strip().lower()
-        if relax_mode == "ambertools_parameterized" and backend_lower != "ambertools":
-            raise RuntimeError(
-                "relax.mode=ambertools_parameterized requires "
-                "amber.parameter_backend=ambertools."
-            )
-        if relax_mode == "hybrid_pre_relax" and backend_lower not in (
-            "ambertools", "residue_aware",
-        ):
-            raise RuntimeError(
-                "relax.mode=hybrid_pre_relax requires "
-                "amber.parameter_backend=ambertools or residue_aware."
-            )
-        if "amber" not in output_export_formats:
-            output_export_formats.append("amber")
 
     outdir = _ensure_outdir(
         cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs"
@@ -504,7 +475,9 @@ def main(cfg: DictConfig) -> None:
 
     amber_summary: dict[str, object] = {"enabled": False}
     amber_export_done = False
-    if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax"):
+
+    # ---- Stage 4b: AMBER export (needed before relaxation for prmtop). ---
+    if relax_requested or amber_cfg_enabled:
         from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv_relax
         _bv_relax = _get_bv_relax(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
@@ -512,7 +485,6 @@ def main(cfg: DictConfig) -> None:
             outdir=outdir / amber_dir,
             model_name="model",
             charge_model=amber_charge_model,
-            parameter_backend=amber_parameter_backend,
             net_charge=amber_net_charge,
             polymer=polymer_kind,
             dp=dp,
@@ -532,15 +504,15 @@ def main(cfg: DictConfig) -> None:
             raise RuntimeError(
                 "Relaxation requested but run_staged_relaxation is unavailable."
             )
+        # Extract selector prmtop for GAFF2 force transfer.
+        _sel_prmtop = None
+        if isinstance(amber_summary.get("files"), dict):
+            _sel_prmtop = amber_summary["files"].get("selector_prmtop")  # type: ignore[union-attr]
         mol_poly, relax_summary = run_staged_relaxation(
             mol=mol_poly,
             spec=relax_spec,
             selector=selector,
-            amber_artifacts=(
-                amber_summary
-                if relax_mode in ("ambertools_parameterized", "hybrid_pre_relax")
-                else None
-            ),
+            selector_prmtop_path=_sel_prmtop,
         )
         relax_enabled = True
 
@@ -663,7 +635,7 @@ def main(cfg: DictConfig) -> None:
 
     qc_pass = len(qc_fail_reasons) == 0
 
-    # ---- Stage 8: optional AMBER export (or already exported for parameterized relaxation).
+    # ---- Stage 8: optional AMBER export (if not already done for relaxation).
     amber_enabled = "amber" in output_export_formats or amber_export_done
     if amber_enabled and not amber_export_done:
         from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv
@@ -673,7 +645,6 @@ def main(cfg: DictConfig) -> None:
             outdir=outdir / amber_dir,
             model_name="model",
             charge_model=amber_charge_model,
-            parameter_backend=amber_parameter_backend,
             net_charge=amber_net_charge,
             polymer=polymer_kind,
             dp=dp,
@@ -703,7 +674,7 @@ def main(cfg: DictConfig) -> None:
         ordering_enabled=bool(ordering_applied),
         ordering_summary=ordering_summary,
         relax_enabled=bool(relax_enabled),
-        relax_mode=relax_mode,
+        relax_mode="hybrid_split_system" if relax_enabled else "none",
         relax_summary=relax_summary,
         qc_min_heavy_distance_A=qc_min_dist,
         qc_class_min_distance_A=qc_class_dist,

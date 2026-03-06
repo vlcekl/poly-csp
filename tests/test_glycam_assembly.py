@@ -6,6 +6,7 @@ import pytest
 
 from poly_csp.io.glycam_assembly import (
     build_glycam_sequence,
+    build_linkage_frcmod,
     build_tleap_script,
 )
 
@@ -43,6 +44,9 @@ def test_tleap_script_backbone_only() -> None:
     assert "saveamberparm" in script
     # Should NOT load GAFF2 leaprc if no selectors
     assert "leaprc.gaff2" not in script
+    # Residue names must NOT have nested braces (Bug 2 regression check).
+    assert "{ 0GA }" not in script
+    assert "sequence { 0GA 4GA" in script
 
 
 def test_tleap_script_with_selector() -> None:
@@ -58,6 +62,38 @@ def test_tleap_script_with_selector() -> None:
     assert "/tmp/sel.frcmod" in script
     # Should have both GLYCAM and GAFF2
     assert "0GA" in script
+
+
+def test_tleap_script_periodic_includes_bond_and_box() -> None:
+    script = build_tleap_script(
+        polymer="amylose",
+        dp=4,
+        periodic=True,
+        box_vectors_A=(50.0, 50.0, 30.0),
+    )
+    assert "bond mol.1.C1 mol.4.O4" in script
+    assert "setBox" in script
+    assert "50.0000" in script
+
+
+def test_tleap_script_periodic_with_linkage_frcmod() -> None:
+    script = build_tleap_script(
+        polymer="amylose",
+        dp=4,
+        periodic=True,
+        box_vectors_A=(50.0, 50.0, 30.0),
+        linkage_frcmod_path="/tmp/linkage.frcmod",
+    )
+    assert "loadamberparams /tmp/linkage.frcmod" in script
+
+
+def test_build_linkage_frcmod(tmp_path) -> None:
+    path = build_linkage_frcmod(tmp_path)
+    assert path.exists()
+    text = path.read_text()
+    assert "DIHE" in text
+    assert "H2-Cg-Cg-H2" in text
+    assert "NONBON" in text
 
 
 def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path) -> None:
@@ -92,10 +128,15 @@ def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path
     monkeypatch.setattr(glycam_assembly, "_run_command", fake_run_command)
     monkeypatch.setattr(glycam_assembly, "_ensure_required_tools", lambda tools: None)
 
-    glycam_assembly.parameterize_selector_fragment(mol, work_dir=tmp_path)
+    result = glycam_assembly.parameterize_selector_fragment(mol, work_dir=tmp_path)
 
     assert len(written_mols) == 1
     written = written_mols[0]
     # No dummy atoms should remain in the molecule written to PDB
     assert all(a.GetAtomicNum() > 0 for a in written.GetAtoms())
+    # All paths should be absolute (Bug 3 regression check).
+    from pathlib import Path
+    for key in ("mol2", "frcmod", "lib"):
+        assert Path(result[key]).is_absolute(), f"{key} path is not absolute: {result[key]}"
+
 
