@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import SelectorPoseSpec
-from poly_csp.geometry.local_frames import compute_residue_local_frame, pose_selector_in_frame
+from poly_csp.structure.local_frames import compute_residue_local_frame, pose_selector_in_frame
 
 
 def test_selector_pose_is_deterministic() -> None:

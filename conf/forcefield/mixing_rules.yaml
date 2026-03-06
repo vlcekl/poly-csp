@@ -1,0 +1,10 @@
+scaling:
+  backbone_backbone:
+    scee: 1.0
+    scnb: 1.0
+  selector_selector:
+    scee: 1.2
+    scnb: 2.0
+  cross_connector:
+    scee: 1.0
+    scnb: 1.0

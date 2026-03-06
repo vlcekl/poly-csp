@@ -17,10 +17,10 @@ pytestmark = pytest.mark.integration
 def test_pipeline_ordering_enabled_writes_summary(tmp_path: Path) -> None:
     outdir = tmp_path / "ordered_out"
     overrides = (
-        "polymer.dp=2 "
-        "selector.enabled=true selector.sites=[C6] "
+        "topology.backbone.dp=2 "
+        "topology.selector.enabled=true topology.selector.sites=[C6] "
         "ordering.enabled=true ordering.max_candidates=8 "
-        "relax.enabled=false amber.enabled=false "
+        "forcefield.options.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
     cmd = [sys.executable, "-m", "poly_csp.pipelines.build_csp", *shlex.split(overrides)]

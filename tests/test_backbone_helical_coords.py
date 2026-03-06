@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.monomers import make_glucose_template
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.config.schema import HelixSpec
-from poly_csp.geometry.transform import ScrewTransform
+from poly_csp.structure.matrix import ScrewTransform
 
 
 def _test_helix() -> HelixSpec:

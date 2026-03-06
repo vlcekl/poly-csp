@@ -4,7 +4,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 
-from poly_csp.chemistry.selectors import SelectorTemplate
+from poly_csp.topology.selectors import SelectorTemplate
 from poly_csp.ordering.hbonds import compute_hbond_metrics
 
 

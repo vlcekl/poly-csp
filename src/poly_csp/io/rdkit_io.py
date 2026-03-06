@@ -4,7 +4,7 @@ from pathlib import Path
 
 from rdkit import Chem
 
-from poly_csp.chemistry.monomers import (
+from poly_csp.topology.monomers import (
     MonomerRepresentation,
     PolymerKind,
     make_glucose_template,

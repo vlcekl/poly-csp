@@ -26,9 +26,11 @@ def _run_build(overrides: str) -> None:
 def test_pipeline_capped_mode_runs_with_explicit_caps(tmp_path: Path) -> None:
     outdir = tmp_path / "capped_out"
     _run_build(
-        "polymer.dp=3 selector.enabled=false polymer.end_mode=capped "
-        "+polymer.end_caps.left=acetyl +polymer.end_caps.right=methoxy "
-        "relax.enabled=false amber.enabled=false "
+        "topology.backbone.dp=3 topology.selector.enabled=false "
+        "topology.backbone.end_mode=capped "
+        "+topology.backbone.end_caps.left=acetyl "
+        "+topology.backbone.end_caps.right=methoxy "
+        "forcefield.options.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
 
@@ -41,9 +43,10 @@ def test_pipeline_capped_mode_runs_with_explicit_caps(tmp_path: Path) -> None:
 def test_pipeline_periodic_natural_oh_runs(tmp_path: Path) -> None:
     outdir = tmp_path / "periodic_out"
     _run_build(
-        "polymer.dp=3 selector.enabled=false "
-        "polymer.monomer_representation=natural_oh polymer.end_mode=periodic "
-        "relax.enabled=false amber.enabled=false "
+        "topology.backbone.dp=3 topology.selector.enabled=false "
+        "topology.backbone.monomer_representation=natural_oh "
+        "topology.backbone.end_mode=periodic "
+        "forcefield.options.enabled=false amber.enabled=false "
         f"output.dir={outdir}"
     )
 

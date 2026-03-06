@@ -5,6 +5,7 @@ optionally in parallel, and returns the top-K ranked by score.
 """
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -14,10 +15,12 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import PropertyPickleOptions
 
-from poly_csp.chemistry.selectors import SelectorTemplate
+from poly_csp.topology.selectors import SelectorTemplate
 from poly_csp.config.schema import Site
 from poly_csp.ordering.rotamers import RotamerGridSpec
-from poly_csp.ordering.symmetry_opt import OrderingSpec, optimize_selector_ordering
+from poly_csp.ordering.optimize import OrderingSpec, optimize_selector_ordering
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,16 +126,29 @@ def run_multi_start_optimization(
             for seed in child_seeds
         ]
     else:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = [
-                pool.submit(
-                    _run_single_start,
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                futures = [
+                    pool.submit(
+                        _run_single_start,
+                        mol_binary, selector, sites_list, dp,
+                        ordering_spec, grid, seed,
+                    )
+                    for seed in child_seeds
+                ]
+                raw_results = [f.result() for f in futures]
+        except (PermissionError, OSError):
+            # Some CI/sandbox environments disallow multiprocessing semaphores.
+            log.warning(
+                "ProcessPoolExecutor unavailable; falling back to serial multi-start."
+            )
+            raw_results = [
+                _run_single_start(
                     mol_binary, selector, sites_list, dp,
                     ordering_spec, grid, seed,
                 )
                 for seed in child_seeds
             ]
-            raw_results = [f.result() for f in futures]
 
     # Sort descending by score.
     raw_results.sort(key=lambda r: r[0], reverse=True)

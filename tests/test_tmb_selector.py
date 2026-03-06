@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.functionalization import attach_selector
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.polymerize import assign_conformer, polymerize
-from poly_csp.chemistry.selector_library.tmb import make_tmb_template
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.reactions import attach_selector
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.selector_library.tmb import make_tmb_template
 from poly_csp.config.schema import HelixSpec
 
 
@@ -33,9 +33,11 @@ def test_tmb_template_structure() -> None:
     assert tmb.attach_atom_idx is not None
     assert tmb.attach_dummy_idx is not None
     assert tmb.attach_atom_idx != tmb.attach_dummy_idx
+    assert tmb.linkage_type == "ester"
     # TMB is an ester: no donors, one acceptor (carbonyl O)
     assert len(tmb.donors) == 0
     assert len(tmb.acceptors) == 1
+    assert set(tmb.connector_local_roles.values()) == {"carbonyl_c", "carbonyl_o"}
 
 
 def test_tmb_attach_at_c6() -> None:

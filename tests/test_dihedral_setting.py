@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.functionalization import (
-    apply_selector_pose_dihedrals,
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.reactions import (
     attach_selector,
 )
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.polymerize import assign_conformer, polymerize
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import HelixSpec, SelectorPoseSpec
-from poly_csp.geometry.dihedrals import measure_dihedral_rad, set_dihedral_rad
+from poly_csp.structure.alignment import apply_selector_pose_dihedrals
+from poly_csp.structure.dihedrals import measure_dihedral_rad, set_dihedral_rad
 
 
 def _helix() -> HelixSpec:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.geometry.transform import ScrewTransform, kabsch_align, rotation_matrix_z
+from poly_csp.structure.matrix import ScrewTransform, kabsch_align, rotation_matrix_z
 
 
 def test_rotation_matrix_z_orthonormality() -> None:

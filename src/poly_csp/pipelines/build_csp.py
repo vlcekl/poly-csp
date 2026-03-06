@@ -9,7 +9,8 @@ Minimal working CSP build pipeline.
 
 Run (from repo root):
   python -m poly_csp.pipelines.build_csp
-  python -m poly_csp.pipelines.build_csp polymer.dp=24 helix=admcp_chiralpak_ad selector.enabled=true
+  python -m poly_csp.pipelines.build_csp topology.backbone.dp=24
+  python -m poly_csp.pipelines.build_csp structure/helix=cellulose_i topology.selector.enabled=true
 """
 
 from __future__ import annotations
@@ -23,10 +24,10 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.polymerize import assign_conformer, polymerize
-from poly_csp.chemistry.terminals import apply_terminal_mode
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.terminals import apply_terminal_mode
 from poly_csp.config.schema import (
     BackboneSpec,
     HelixSpec,
@@ -35,10 +36,10 @@ from poly_csp.config.schema import (
     SelectorPoseSpec,
     Site,
 )
-from poly_csp.io.amber import export_amber_artifacts
+from poly_csp.forcefield.glycam import export_amber_artifacts
 from poly_csp.io.pdb import write_pdb_from_rdkit
 from poly_csp.io.rdkit_io import write_sdf
-from poly_csp.geometry.pbc import compute_helical_box_vectors, set_box_vectors
+from poly_csp.structure.pbc import compute_helical_box_vectors, set_box_vectors
 from poly_csp.ordering.hbonds import compute_hbond_metrics
 from poly_csp.ordering.scoring import (
     bonded_exclusion_pairs,
@@ -47,16 +48,14 @@ from poly_csp.ordering.scoring import (
     screw_symmetry_rmsd_from_mol,
     selector_torsion_stats,
 )
-from poly_csp.ordering.symmetry_opt import OrderingSpec, optimize_selector_ordering
+from poly_csp.ordering.optimize import OrderingSpec, optimize_selector_ordering
 from poly_csp.ordering.multi_opt import MultiOptSpec, run_multi_start_optimization
 
 # Optional selector imports (keep pipeline runnable even before selector is implemented).
 try:
-    from poly_csp.chemistry.selectors import SelectorRegistry, SelectorTemplate
-    from poly_csp.chemistry.functionalization import (
-        apply_selector_pose_dihedrals,
-        attach_selector,
-    )
+    from poly_csp.topology.selectors import SelectorRegistry, SelectorTemplate
+    from poly_csp.topology.reactions import attach_selector
+    from poly_csp.structure.alignment import apply_selector_pose_dihedrals
 except (ImportError, ModuleNotFoundError):
     SelectorRegistry = None  # type: ignore
     SelectorTemplate = None  # type: ignore
@@ -67,7 +66,7 @@ except Exception as exc:  # noqa: BLE001
 
 # Optional MM imports (keep baseline path runnable if OpenMM is unavailable).
 try:
-    from poly_csp.mm.minimize import RelaxSpec, run_staged_relaxation
+    from poly_csp.forcefield.relaxation import RelaxSpec, run_staged_relaxation
 except (ImportError, ModuleNotFoundError):
     RelaxSpec = None  # type: ignore
     run_staged_relaxation = None  # type: ignore
@@ -134,17 +133,20 @@ class BuildReport:
 
 
 def _cfg_to_helixspec(cfg: DictConfig) -> HelixSpec:
+    helix_cfg = cfg.structure.helix
     return HelixSpec(
-        name=str(cfg.helix.name),
-        theta_rad=float(cfg.helix.theta_rad),
-        rise_A=float(cfg.helix.rise_A),
-        repeat_residues=int(cfg.helix.repeat_residues)
-        if "repeat_residues" in cfg.helix
+        name=str(helix_cfg.name),
+        theta_rad=float(helix_cfg.theta_rad),
+        rise_A=float(helix_cfg.rise_A),
+        repeat_residues=int(helix_cfg.repeat_residues)
+        if "repeat_residues" in helix_cfg
         else None,
-        repeat_turns=int(cfg.helix.repeat_turns) if "repeat_turns" in cfg.helix else None,
-        residues_per_turn=float(cfg.helix.residues_per_turn),
-        pitch_A=float(cfg.helix.pitch_A),
-        handedness=str(cfg.helix.handedness) if "handedness" in cfg.helix else "right",
+        repeat_turns=int(helix_cfg.repeat_turns)
+        if "repeat_turns" in helix_cfg
+        else None,
+        residues_per_turn=float(helix_cfg.residues_per_turn),
+        pitch_A=float(helix_cfg.pitch_A),
+        handedness=str(helix_cfg.handedness) if "handedness" in helix_cfg else "right",
     )
 
 
@@ -169,7 +171,14 @@ def _cfg_to_multi_opt_spec(cfg: DictConfig) -> MultiOptSpec:
 def _cfg_to_relax_spec(cfg: DictConfig):
     if RelaxSpec is None:
         return None
-    relax_cfg = cfg.relax if "relax" in cfg and cfg.relax is not None else {}
+    relax_cfg = (
+        cfg.forcefield.options
+        if "forcefield" in cfg
+        and cfg.forcefield is not None
+        and "options" in cfg.forcefield
+        and cfg.forcefield.options is not None
+        else {}
+    )
     anneal_cfg = (
         relax_cfg.anneal
         if hasattr(relax_cfg, "anneal") and relax_cfg.anneal is not None
@@ -252,10 +261,12 @@ def _cfg_to_qc_spec(cfg: DictConfig) -> QcSpec:
 
 def _selector_enabled(cfg: DictConfig) -> bool:
     return bool(
-        "selector" in cfg
-        and cfg.selector is not None
-        and "enabled" in cfg.selector
-        and cfg.selector.enabled
+        "topology" in cfg
+        and cfg.topology is not None
+        and "selector" in cfg.topology
+        and cfg.topology.selector is not None
+        and "enabled" in cfg.topology.selector
+        and cfg.topology.selector.enabled
     )
 
 
@@ -281,17 +292,20 @@ def main(cfg: DictConfig) -> None:
     print("=== poly_csp build_csp ===")
     print(OmegaConf.to_yaml(cfg))
 
-    polymer_kind: PolymerKind = str(cfg.polymer.kind)  # type: ignore[assignment]
-    dp: int = int(cfg.polymer.dp)
+    backbone_cfg = cfg.topology.backbone
+    selector_cfg = cfg.topology.selector
+
+    polymer_kind: PolymerKind = str(backbone_cfg.kind)  # type: ignore[assignment]
+    dp: int = int(backbone_cfg.dp)
     monomer_representation: MonomerRepresentation = str(
-        cfg.polymer.monomer_representation
-        if "monomer_representation" in cfg.polymer
+        backbone_cfg.monomer_representation
+        if "monomer_representation" in backbone_cfg
         else "anhydro"
     )  # type: ignore[assignment]
-    end_mode = str(cfg.polymer.end_mode if "end_mode" in cfg.polymer else "open")
+    end_mode = str(backbone_cfg.end_mode if "end_mode" in backbone_cfg else "open")
     end_caps = (
-        dict(OmegaConf.to_container(cfg.polymer.end_caps, resolve=True))
-        if "end_caps" in cfg.polymer and cfg.polymer.end_caps is not None
+        dict(OmegaConf.to_container(backbone_cfg.end_caps, resolve=True))
+        if "end_caps" in backbone_cfg and backbone_cfg.end_caps is not None
         else {}
     )
 
@@ -344,7 +358,12 @@ def main(cfg: DictConfig) -> None:
     qc_spec = _cfg_to_qc_spec(cfg)
 
     relax_requested = bool(
-        "relax" in cfg and cfg.relax is not None and "enabled" in cfg.relax and cfg.relax.enabled
+        "forcefield" in cfg
+        and cfg.forcefield is not None
+        and "options" in cfg.forcefield
+        and cfg.forcefield.options is not None
+        and "enabled" in cfg.forcefield.options
+        and cfg.forcefield.options.enabled
     )
     relax_spec = _cfg_to_relax_spec(cfg)
     if relax_requested and (run_staged_relaxation is None or relax_spec is None):
@@ -416,12 +435,12 @@ def main(cfg: DictConfig) -> None:
                 "Selector attachment requested but selector modules are not available."
             )
 
-        selector_name = str(cfg.selector.name)
-        selector_sites = [str(s) for s in cfg.selector.sites]  # type: ignore[assignment]
+        selector_name = str(selector_cfg.name)
+        selector_sites = [str(s) for s in selector_cfg.sites]  # type: ignore[assignment]
         selector = SelectorRegistry.get(selector_name)
 
-        if "pose" in cfg.selector and cfg.selector.pose is not None:
-            pose_payload = OmegaConf.to_container(cfg.selector.pose, resolve=True)
+        if "pose" in selector_cfg and selector_cfg.pose is not None:
+            pose_payload = OmegaConf.to_container(selector_cfg.pose, resolve=True)
             if isinstance(pose_payload, dict):
                 selector_pose = SelectorPoseSpec(**pose_payload)
 
@@ -478,7 +497,7 @@ def main(cfg: DictConfig) -> None:
 
     # ---- Stage 4b: AMBER export (needed before relaxation for prmtop). ---
     if relax_requested or amber_cfg_enabled:
-        from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv_relax
+        from poly_csp.structure.pbc import get_box_vectors_A as _get_bv_relax
         _bv_relax = _get_bv_relax(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
             mol=mol_poly,
@@ -638,7 +657,7 @@ def main(cfg: DictConfig) -> None:
     # ---- Stage 8: optional AMBER export (if not already done for relaxation).
     amber_enabled = "amber" in output_export_formats or amber_export_done
     if amber_enabled and not amber_export_done:
-        from poly_csp.geometry.pbc import get_box_vectors_A as _get_bv
+        from poly_csp.structure.pbc import get_box_vectors_A as _get_bv
         _bv = _get_bv(mol_poly) if is_periodic else None
         amber_summary = export_amber_artifacts(
             mol=mol_poly,

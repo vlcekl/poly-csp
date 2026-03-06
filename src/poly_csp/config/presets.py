@@ -2,7 +2,7 @@
 
 This module is currently reference-only and is not the runtime source of truth
 for pipeline defaults. Active defaults are managed by Hydra YAML files in
-`conf/helix/`.
+`conf/structure/helix/`.
 """
 
 from __future__ import annotations

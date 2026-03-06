@@ -66,3 +66,25 @@ class SelectorPoseSpec(BaseModel):
     # (unit vectors in local frame; use later if needed)
     carbonyl_dir_local: Optional[Tuple[float, float, float]] = None
     aromatic_normal_local: Optional[Tuple[float, float, float]] = None
+
+
+class ScalingPair(BaseModel):
+    scee: confloat(gt=0) = 1.0
+    scnb: confloat(gt=0) = 1.0
+
+
+class MixingRules(BaseModel):
+    backbone_backbone: ScalingPair = Field(
+        default_factory=lambda: ScalingPair(scee=1.0, scnb=1.0)
+    )
+    selector_selector: ScalingPair = Field(
+        default_factory=lambda: ScalingPair(scee=1.2, scnb=2.0)
+    )
+    cross_connector: ScalingPair = Field(
+        default_factory=lambda: ScalingPair(scee=1.0, scnb=1.0)
+    )
+
+
+class ForceFieldConfig(BaseModel):
+    options: Dict[str, object] = Field(default_factory=dict)
+    mixing_rules: MixingRules = Field(default_factory=MixingRules)

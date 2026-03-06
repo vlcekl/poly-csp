@@ -11,7 +11,7 @@ from openmm import unit  # noqa: E402
 from rdkit import Chem  # noqa: E402
 from rdkit.Chem import AllChem  # noqa: E402
 
-from poly_csp.mm.openmm_system import (  # noqa: E402
+from poly_csp.forcefield.system_builder import (  # noqa: E402
     build_bonded_relaxation_system,
     build_relaxation_system,
 )

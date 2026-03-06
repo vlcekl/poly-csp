@@ -9,8 +9,8 @@ from rdkit import Chem
 from scipy.spatial import cKDTree
 
 from poly_csp.config.schema import HelixSpec
-from poly_csp.geometry.dihedrals import measure_dihedral_rad
-from poly_csp.geometry.transform import ScrewTransform
+from poly_csp.structure.dihedrals import measure_dihedral_rad
+from poly_csp.structure.matrix import ScrewTransform
 
 
 def bonded_exclusion_pairs(mol: Chem.Mol, max_path_length: int = 2) -> set[tuple[int, int]]:

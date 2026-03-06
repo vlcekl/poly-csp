@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
-from poly_csp.chemistry.selectors import SelectorRegistry
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.selectors import SelectorRegistry
 
 
 def test_selector_registry_register_and_get() -> None:

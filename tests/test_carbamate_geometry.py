@@ -5,12 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.functionalization import attach_selector
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.polymerize import assign_conformer, polymerize
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
-from poly_csp.chemistry.linkage import CARBAMATE, build_linkage_coords
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.reactions import attach_selector
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.linkage import CARBAMATE, build_linkage_coords
 from poly_csp.config.schema import HelixSpec
 
 

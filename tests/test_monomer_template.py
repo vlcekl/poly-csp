@@ -4,7 +4,7 @@ from pathlib import Path
 
 from rdkit import Chem
 
-from poly_csp.chemistry.monomers import make_glucose_template
+from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.io.rdkit_io import export_glucose_template_sdf
 
 

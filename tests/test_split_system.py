@@ -10,7 +10,7 @@ from openmm import unit  # noqa: E402
 from rdkit import Chem  # noqa: E402
 from rdkit.Chem import AllChem  # noqa: E402
 
-from poly_csp.mm.openmm_system import (  # noqa: E402
+from poly_csp.forcefield.system_builder import (  # noqa: E402
     build_selector_bonded_forces,
 )
 
@@ -104,7 +104,7 @@ class TestBackboneFreezing:
 
     def test_frozen_backbone_does_not_move(self) -> None:
         """Run dynamics with backbone masses set to 0; verify they don't move."""
-        from poly_csp.mm.openmm_system import (
+        from poly_csp.forcefield.system_builder import (
             build_bonded_relaxation_system,
             _atomic_mass_dalton,
         )

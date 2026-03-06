@@ -6,7 +6,7 @@ from typing import Iterable, List, Tuple
 import numpy as np
 from rdkit import Chem
 
-from poly_csp.chemistry.selectors import SelectorTemplate
+from poly_csp.topology.selectors import SelectorTemplate
 
 
 @dataclass(frozen=True)

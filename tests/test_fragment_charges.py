@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from poly_csp.io.fragment_charges import (
+from poly_csp.forcefield.charges import (
     neutralize_charges,
     replicate_charges,
 )

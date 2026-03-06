@@ -81,11 +81,16 @@ poly_csp/
 │
 ├── conf/                  # Hydra configuration files
 │   ├── config.yaml
-│   ├── helix/
-│   ├── polymer/
-│   ├── selector/
+│   ├── topology/
+│   │   ├── backbone/
+│   │   └── selector/
+│   ├── structure/
+│   │   └── helix/
+│   ├── forcefield/
+│   │   ├── options/
+│   │   └── mixing_rules.yaml
 │   ├── ordering/
-│   ├── relax/
+│   ├── multi_opt/
 │   └── qc/
 │
 └── src/
@@ -95,37 +100,41 @@ poly_csp/
         │   ├── schema.py
         │   └── presets.py
         │
-        ├── geometry/
-        │   ├── transform.py
-        │   ├── local_frames.py
-        │   └── dihedrals.py
-        │
-        ├── chemistry/
+        ├── topology/
         │   ├── monomers.py
-        │   ├── backbone_build.py
-        │   ├── polymerize.py
-        │   ├── terminals.py
-        │   ├── selectors.py
-        │   └── functionalization.py
+        │   ├── backbone.py
+        │   ├── reactions.py
+        │   ├── atom_mapping.py
+        │   └── selectors.py
+        │
+        ├── structure/
+        │   ├── matrix.py
+        │   ├── build_helix.py
+        │   ├── local_frames.py
+        │   ├── dihedrals.py
+        │   └── alignment.py
+        │
+        ├── forcefield/
+        │   ├── system_builder.py
+        │   ├── relaxation.py
+        │   ├── gaff.py
+        │   ├── glycam.py
+        │   ├── exceptions.py
+        │   └── restraints.py
         │
         ├── ordering/
         │   ├── rotamers.py
         │   ├── scoring.py
         │   ├── hbonds.py
-        │   └── symmetry_opt.py
-        │
-        ├── mm/
-        │   ├── openmm_system.py
-        │   ├── restraints.py
-        │   ├── anneal.py
-        │   └── minimize.py
+        │   ├── optimize.py
+        │   └── multi_opt.py
         │
         ├── pipelines/
         │   └── build_csp.py
         │
         └── io/
             ├── rdkit_io.py
-            ├── amber.py
+            ├── openmm_io.py
             └── pdb.py
 ```
 
@@ -168,33 +177,45 @@ Example structure:
 ```
 conf/
 ├── config.yaml
-├── helix/
-│   ├── admcp_chiralpak_ad.yaml
-│   └── cellulose_i.yaml
-├── polymer/
-│   ├── amylose.yaml
-│   └── cellulose.yaml
-├── selector/
-│   └── dmpc_35.yaml
-└── relax/
-    └── hybrid.yaml
+├── topology/
+│   ├── backbone/
+│   │   ├── amylose.yaml
+│   │   └── cellulose.yaml
+│   └── selector/
+│       └── dmpc_35.yaml
+├── structure/
+│   └── helix/
+│       ├── chiralpak_ad.yaml
+│       └── cellulose_i.yaml
+├── forcefield/
+│   ├── options/
+│   │   ├── vacuum.yaml
+│   │   └── vacuum_stiff_backbone.yaml
+│   └── mixing_rules.yaml
+├── ordering/
+│   └── basic.yaml
+├── multi_opt/
+│   └── default.yaml
+└── qc/
+    └── basic.yaml
 ```
 
 ### Example `conf/config.yaml`
 
 ```yaml
 defaults:
-  - helix: admcp_chiralpak_ad
-  - polymer: amylose
-  - selector: dmpc_35
-  - relax: restrained
+  - topology/backbone: amylose
+  - topology/selector: dmpc_35
+  - structure/helix: chiralpak_ad
+  - forcefield/options: vacuum_stiff_backbone
+  - ordering: basic
+  - forcefield: mixing_rules
+  - qc: basic
+  - multi_opt: default
   - _self_
 
-polymer:
-  dp: 24
-
 output:
-  dir: outputs/
+  dir: outputs
 ```
 
 ---
@@ -236,7 +257,7 @@ which tleap
 Example:
 
 ```bash
-python -m poly_csp.pipelines.build_csp polymer.dp=24
+python -m poly_csp.pipelines.build_csp topology.backbone.dp=24
 ```
 
 Hydra will create an output directory like:
@@ -259,19 +280,19 @@ Containing:
 Change helix:
 
 ```bash
-python -m poly_csp.pipelines.build_csp helix=cellulose_i
+python -m poly_csp.pipelines.build_csp structure/helix=cellulose_i
 ```
 
 Change degree of polymerization:
 
 ```bash
-python -m poly_csp.pipelines.build_csp polymer.dp=48
+python -m poly_csp.pipelines.build_csp topology.backbone.dp=48
 ```
 
 Change selector site(s):
 
 ```bash
-python -m poly_csp.pipelines.build_csp selector.sites=[C6]
+python -m poly_csp.pipelines.build_csp topology.selector.sites=[C6]
 ```
 
 ---
@@ -307,13 +328,13 @@ python -m poly_csp.pipelines.build_csp \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `multi_opt.enabled` | `false` | Enable multi-start optimization |
-| `multi_opt.n_starts` | `5` | Number of independent optimization runs |
-| `multi_opt.top_k` | `3` | Number of top-ranked results to keep |
+| `multi_opt.n_starts` | `10` | Number of independent optimization runs |
+| `multi_opt.top_k` | `5` | Number of top-ranked results to keep |
 | `multi_opt.seed` | `null` | Master random seed (null = random) |
 | `multi_opt.strategy` | `multi_start` | Optimization strategy |
 | `multi_opt.n_workers` | `0` | Parallel workers (0 = auto-detect CPUs, 1 = serial) |
 
-Runs execute in parallel across CPU cores by default, providing near-linear speedup.
+Runs execute in parallel across CPU cores by default and automatically fall back to serial mode in restricted environments where multiprocessing semaphores are unavailable.
 
 ### Output structure
 
@@ -361,19 +382,17 @@ Each build produces:
 
 # Model Validity
 
-The project supports two relaxation modes:
+The relaxation pipeline is controlled by `forcefield.options.enabled` in `conf/forcefield/options/vacuum_stiff_backbone.yaml`:
 
-1. `geometry_pre_relax` (default fallback):
-   - Soft-repulsion + restraint guided coordinate cleanup.
-   - Useful for deterministic pre-organization and clash reduction.
-   - Not a full physical force-field model.
+1. `forcefield.options.enabled=false`
+   - No OpenMM relaxation; output stays as deterministic construction + ordering result.
 
-2. `hybrid_pre_relax` (recommended, default in `conf/relax/hybrid.yaml`):
-   - Uses AMBER bonded forces (from `prmtop`) + soft repulsion non-bonded.
-   - When the AMBER topology covers only a subset of the molecule (e.g., backbone only from `residue_aware` backend), falls back to generic RDKit-derived bonded forces (harmonic bonds and angles) that keep the molecule intact during annealing.
-   - Supports staged restraint release and Langevin annealing with heat/cool cycles.
+2. `forcefield.options.enabled=true` (default)
+   - Staged restrained relaxation with frozen backbone heavy atoms.
+   - Uses AMBER-derived selector terms when available and generic RDKit-derived bonded terms as fallback.
+   - Supports optional heat/cool annealing schedule and staged restraint release.
 
-Use the mode explicitly via `relax.mode=...` and interpret outputs accordingly.
+This is still an incremental forcefield workflow, not a fully automated production-forcefield endpoint.
 
 ---
 
@@ -420,12 +439,12 @@ When adding new selectors:
 2. Define attachment atom index.
 3. Define dihedral set.
 4. Register in `SelectorRegistry`.
-5. Add Hydra config in `/conf/selector/`.
+5. Add Hydra config in `/conf/topology/selector/`.
 
 When adding new helix presets:
 
 1. Define `HelixSpec` in `presets.py`.
-2. Add Hydra YAML in `/conf/helix/`.
+2. Add Hydra YAML in `/conf/structure/helix/`.
 
 ---
 
@@ -442,4 +461,4 @@ Used in chiral chromatography systems such as Chiralpak AD.
 
 # Status
 
-Deterministic construction workflow with selector attachment, ordering, QC, SDF export, multi-start optimization, and hybrid relaxation (AMBER bonded + soft repulsion, with RDKit-bonded fallback).
+Migrated to a domain-oriented code layout (`topology/`, `structure/`, `forcefield/`, `ordering/`) with deterministic construction, selector attachment, ordering, QC, SDF export, multi-start optimization, and hybrid relaxation (AMBER bonded + soft repulsion, with RDKit-bonded fallback).

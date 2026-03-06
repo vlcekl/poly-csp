@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from poly_csp.io.glycam_assembly import (
+from poly_csp.forcefield.glycam import (
     build_glycam_sequence,
     build_linkage_frcmod,
     build_tleap_script,
@@ -100,7 +100,7 @@ def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path
     """Dummy atoms in the selector mol should be replaced with H before PDB write."""
     from rdkit import Chem
     from rdkit.Chem import AllChem
-    from poly_csp.io import glycam_assembly
+    from poly_csp.forcefield import glycam as glycam_assembly
 
     # Build a small mol with a dummy atom
     mol = Chem.MolFromSmiles("[*]C(=O)NC")
@@ -138,5 +138,4 @@ def test_parameterize_selector_fragment_cleans_dummy_atoms(monkeypatch, tmp_path
     from pathlib import Path
     for key in ("mol2", "frcmod", "lib"):
         assert Path(result[key]).is_absolute(), f"{key} path is not absolute: {result[key]}"
-
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rdkit import Chem
 
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
 
 
 def test_make_35_dmpc_template_structure() -> None:
@@ -11,9 +11,15 @@ def test_make_35_dmpc_template_structure() -> None:
     assert tpl.mol.GetNumAtoms() > 0
     assert tpl.attach_dummy_idx is not None
     assert tpl.attach_atom_idx != tpl.attach_dummy_idx
+    assert tpl.linkage_type == "carbamate"
     assert "tau_link" in tpl.dihedrals
     assert len(tpl.donors) >= 1
     assert len(tpl.acceptors) >= 1
+    assert set(tpl.connector_local_roles.values()) == {
+        "carbonyl_c",
+        "carbonyl_o",
+        "amide_n",
+    }
 
 
 def test_make_35_dmpc_template_attach_atom_is_carbonyl_c() -> None:

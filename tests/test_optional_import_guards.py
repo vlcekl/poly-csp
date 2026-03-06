@@ -9,7 +9,7 @@ import pytest
 
 def _fresh_import_build_csp(monkeypatch: pytest.MonkeyPatch, injected_exc: Exception):
     module_name = "poly_csp.pipelines.build_csp"
-    optional_name = "poly_csp.mm.minimize"
+    optional_name = "poly_csp.forcefield.relaxation"
     sys.modules.pop(module_name, None)
     sys.modules.pop(optional_name, None)
 

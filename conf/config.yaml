@@ -1,9 +1,10 @@
 defaults:
-  - helix: admcp_chiralpak_ad
-  - polymer: amylose
-  - selector: dmpc_35
+  - topology/backbone: amylose
+  - topology/selector: dmpc_35
+  - structure/helix: chiralpak_ad
+  - forcefield/options: vacuum_stiff_backbone
   - ordering: basic
-  - relax: hybrid
+  - forcefield: mixing_rules
   - qc: basic
   - multi_opt: default
   - _self_

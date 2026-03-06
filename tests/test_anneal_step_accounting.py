@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from poly_csp.mm.anneal import run_temperature_ramp
+from poly_csp.forcefield.anneal import run_temperature_ramp
 
 
 @dataclass

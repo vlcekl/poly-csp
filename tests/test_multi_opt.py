@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.chemistry.backbone_build import build_backbone_coords
-from poly_csp.chemistry.functionalization import attach_selector
-from poly_csp.chemistry.monomers import make_glucose_template
-from poly_csp.chemistry.polymerize import assign_conformer, polymerize
-from poly_csp.chemistry.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.topology.reactions import attach_selector
+from poly_csp.topology.monomers import make_glucose_template
+from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import HelixSpec
 from poly_csp.ordering.multi_opt import MultiOptSpec, RankedResult, run_multi_start_optimization
-from poly_csp.ordering.symmetry_opt import OrderingSpec
+from poly_csp.ordering.optimize import OrderingSpec
 
 
 def _helix() -> HelixSpec:
@@ -100,3 +100,31 @@ def test_multi_start_no_seed_runs() -> None:
 
     assert len(results) == 2
     assert results[0].rank == 1
+
+
+def test_multi_start_falls_back_to_serial_when_process_pool_unavailable(
+    monkeypatch,
+) -> None:
+    mol, selector = _build_mol(dp=2)
+    ordering_spec = OrderingSpec(enabled=True, repeat_residues=1, max_candidates=4)
+    multi_spec = MultiOptSpec(enabled=True, n_starts=2, top_k=2, seed=7, n_workers=2)
+
+    class _FailingPool:
+        def __init__(self, *args, **kwargs):  # noqa: D401
+            raise PermissionError("blocked by sandbox")
+
+    import poly_csp.ordering.multi_opt as multi_mod
+
+    monkeypatch.setattr(multi_mod, "ProcessPoolExecutor", _FailingPool)
+
+    results = run_multi_start_optimization(
+        mol=mol,
+        selector=selector,
+        sites=["C6"],
+        dp=2,
+        ordering_spec=ordering_spec,
+        multi_spec=multi_spec,
+    )
+
+    assert len(results) == 2
+    assert all(isinstance(r, RankedResult) for r in results)
