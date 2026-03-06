@@ -80,6 +80,9 @@ def test_pipeline_writes_all_atom_model_by_default_and_optional_heavy_debug(
     report = json.loads((outdir / "build_report.json").read_text(encoding="utf-8"))
     assert report["final_structure_variant"] == "all_atom"
     assert report["heavy_debug_written"] is True
+    assert report["all_atom_atom_count"] is not None
+    assert report["all_atom_backbone_h_count"] is not None
+    assert report["all_atom_manifest_schema_version"] == 1
 
     model_pdb = outdir / "model.pdb"
     heavy_pdb = outdir / "model_heavy.pdb"

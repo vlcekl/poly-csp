@@ -45,6 +45,8 @@ def _annotate_selector_atoms(
         atom.SetIntProp("_poly_csp_residue_index", residue_index)
         atom.SetProp("_poly_csp_site", site)
         atom.SetIntProp("_poly_csp_selector_local_idx", local_idx)
+        atom.SetProp("_poly_csp_selector_name", selector.name)
+        atom.SetProp("_poly_csp_linkage_type", selector.linkage_type)
         if local_idx in selector.connector_local_roles:
             atom.SetProp("_poly_csp_component", "connector")
             atom.SetIntProp("_poly_csp_connector_atom", 1)

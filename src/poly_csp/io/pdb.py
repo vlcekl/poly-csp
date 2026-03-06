@@ -45,9 +45,13 @@ def _assign_pdb_info(mol: Chem.Mol) -> None:
             res_name = "SEL"
             chain_id = "B"
             res_idx = (
-                int(atom.GetIntProp("_poly_csp_residue_index"))
-                if atom.HasProp("_poly_csp_residue_index")
-                else 0
+                int(atom.GetIntProp("_poly_csp_selector_instance")) - 1
+                if atom.HasProp("_poly_csp_selector_instance")
+                else (
+                    int(atom.GetIntProp("_poly_csp_residue_index"))
+                    if atom.HasProp("_poly_csp_residue_index")
+                    else 0
+                )
             )
             parent_atom = mol.GetAtomWithIdx(parent_idx)
             local_idx = idx
@@ -61,7 +65,7 @@ def _assign_pdb_info(mol: Chem.Mol) -> None:
                 else f"{atom.GetSymbol()}{local_idx}"
             )
         else:
-            res_name = "GLC"
+            res_name = "CAP" if atom.HasProp("_poly_csp_terminal_cap_side") else "GLC"
             chain_id = "A"
             res_idx = residue_for_atom.get(parent_idx, 0)
             # Try to get atom label from the residue label maps
@@ -69,6 +73,9 @@ def _assign_pdb_info(mol: Chem.Mol) -> None:
             parent_label = backbone_label_for_atom.get(parent_idx)
             if parent_label is not None:
                 atom_name = f"H{parent_label}" if is_hydrogen else parent_label
+
+        if atom.HasProp("_poly_csp_atom_name"):
+            atom_name = atom.GetProp("_poly_csp_atom_name")
 
         # Format atom name: PDB convention is 4 chars, left-justified for
         # 2-char element symbols, otherwise right-padded.

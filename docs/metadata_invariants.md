@@ -43,6 +43,9 @@ dihedral application, atom mapping, and terminal/export stages.
 - `_poly_csp_selector_count`:
   Number of selectors attached so far (monotonic with each attach operation).
 
+- `_poly_csp_manifest_schema_version`:
+  Integer schema version for the derived all-atom atom manifest / naming policy.
+
 ## Atom Properties (selector atoms)
 
 - `_poly_csp_selector_instance`:
@@ -56,6 +59,12 @@ dihedral application, atom mapping, and terminal/export stages.
 
 - `_poly_csp_selector_local_idx`:
   Selector template-local atom index before any merge/removal operations.
+
+- `_poly_csp_selector_name`:
+  Selector template name attached to the atom instance.
+
+- `_poly_csp_linkage_type`:
+  Attachment linkage type (`carbamate`, `ester`, `ether`, ...).
 
 - `_poly_csp_component`:
   Component tag used by the domain migration (`backbone`, `selector`, `connector`).
@@ -74,6 +83,26 @@ dihedral application, atom mapping, and terminal/export stages.
   Present on derived explicit-hydrogen atoms. Points to the hydrogen-suppressed
   parent heavy atom so residue/component/selector metadata can be inherited.
 
+- `_poly_csp_residue_label`:
+  Backbone residue-local atom label (`C1`, `O4`, `O6`, ...). Added on the
+  derived all-atom structure/forcefield handoff for backbone atoms and inherited
+  by backbone hydrogens from their parent heavy atom.
+
+- `_poly_csp_terminal_cap_side`:
+  Present on derived terminal-cap atoms (`left` or `right`) so cap hydrogens and
+  exported atom names can be assigned deterministically.
+
+- `_poly_csp_atom_name`:
+  Deterministic short atom name used by the all-atom structure/forcefield handoff
+  and PDB export.
+
+- `_poly_csp_canonical_name`:
+  Expanded semantic atom identity used by the all-atom manifest.
+
+- `_poly_csp_manifest_source`:
+  Indicates which handoff source class produced the atom identity
+  (`backbone`, `selector`, `connector`, `terminal_cap_left`, `terminal_cap_right`).
+
 ## Invariants
 
 1. `_poly_csp_residue_label_map_json` must always refer to valid global atom indices in the current molecule.
@@ -83,3 +112,6 @@ dihedral application, atom mapping, and terminal/export stages.
 5. Component tagging must remain single-valued per atom (`backbone` xor `selector` xor `connector`).
 6. Connector atoms must retain `_poly_csp_selector_instance` and `_poly_csp_selector_local_idx` so they can be remapped from capped-fragment parameters back onto the full polymer.
 7. Hydrogen completion is a derived step: explicit H atoms inherit component/residue/selector metadata from their parent heavy atom and record `_poly_csp_parent_heavy_idx`.
+8. The structure-domain all-atom handoff preserves heavy-atom indices from the heavy master; explicit hydrogens are appended after the heavy atoms.
+9. Backbone hydrogens in the all-atom handoff come from explicit-H residue templates, not from late whole-molecule generic hydrogen addition.
+10. PDB naming should prefer `_poly_csp_atom_name` / preassigned residue info when present instead of regenerating names heuristically.

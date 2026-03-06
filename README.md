@@ -71,6 +71,101 @@ The system is built in stages:
 
 ---
 
+# Domain Boundaries And Guardrails
+
+This project is intentionally organized into separate but synchronized domains. This is not a stylistic preference; it is the main architectural guardrail that keeps the pipeline chemically correct.
+
+## 1. Topology domain: chemical identity only
+
+The topology domain is responsible for:
+
+* covalent graph construction,
+* polymerization,
+* selector attachment,
+* residue and component identity,
+* stable atom/residue metadata.
+
+Guiding rules:
+
+* The topology domain may remain hydrogen-suppressed if that keeps reactions and mapping robust.
+* Hydrogen-suppressed does **not** mean chemically ambiguous.
+* The topology domain must preserve enough information to add hydrogens later without guessing:
+  * residue state,
+  * terminal state,
+  * linkage state,
+  * selector substitution state.
+
+What we do **not** want:
+
+* topology logic that depends on a late generic "just add hydrogens somehow" step,
+* forcefield logic leaking back into topology construction.
+
+## 2. Structure domain: all-atom geometry
+
+The structure domain is responsible for:
+
+* helical coordinate construction,
+* selector placement,
+* deterministic geometric transforms,
+* all-atom structural handoff into the forcefield domain.
+
+Guiding rules:
+
+* The structure domain should be **explicit-H** before force assignment.
+* Backbone helix construction should use explicit-H residue templates and transform all atoms, including hydrogens, by the same screw operation.
+* We do **not** want a late generic backbone hydrogen-placement routine after the helix has already been built.
+
+Practical implication:
+
+* topology can stay hydrogen-suppressed for chemistry,
+* but structure should hand the forcefield an all-atom CSP with explicit hydrogens and stable semantic identity metadata.
+
+## 3. Forcefield domain: all-atom physical parameters
+
+The forcefield domain is responsible for:
+
+* GLYCAM backbone parameter assignment,
+* GAFF2 selector parameter assignment,
+* capped-fragment connector parameter assignment,
+* OpenMM `System` construction,
+* explicit 1-4 exception handling across component boundaries.
+
+Guiding rules:
+
+* The forcefield domain is **all-atom**.
+* GLYCAM must stay GLYCAM.
+* GAFF must stay GAFF.
+* Connector terms must come from chemically relevant capped fragments.
+* No forcefield-enabled optimization path should rely on generic bonded placeholders as its claimed physics.
+
+## 4. Ordering and optimization domain: forcefield-driven
+
+Ordering is not just a geometric cleanup pass. It must optimize against the intended physics.
+
+Guiding rules:
+
+* Ordering and relaxation should operate on the real all-atom OpenMM system.
+* The intended optimization protocol is two-stage:
+  1. realistic bonded terms + soft-repulsion nonbonded interactions to remove bad overlaps,
+  2. full realistic nonbonded interactions for final refinement.
+* Soft repulsion is a stage-1 nonbonded model, not a substitute production forcefield.
+
+## 5. Modular parameterization remains the core principle
+
+We still do **not** want to solve this by running one monolithic AmberTools job on the full polymer.
+
+The intended workflow is:
+
+1. build the chemically exact CSP in RDKit,
+2. build the all-atom structure deterministically,
+3. parameterize backbone, selector, and connector separately,
+4. merge them explicitly in OpenMM,
+5. export all-atom AMBER-format products as downstream artifacts.
+
+If future implementation work conflicts with these rules, the implementation is drifting away from the project design and should be corrected.
+
+---
+
 # Project Structure
 
 ```
@@ -100,21 +195,21 @@ poly_csp/
         │   ├── schema.py
         │   └── presets.py
         │
-        ├── topology/
+        ├── topology/         # Chemical graph and residue/component identity
         │   ├── monomers.py
         │   ├── backbone.py
         │   ├── reactions.py
         │   ├── atom_mapping.py
         │   └── selectors.py
         │
-        ├── structure/
+        ├── structure/        # Deterministic all-atom geometry handoff
         │   ├── matrix.py
         │   ├── build_helix.py
         │   ├── local_frames.py
         │   ├── dihedrals.py
         │   └── alignment.py
         │
-        ├── forcefield/
+        ├── forcefield/       # All-atom parameter assignment and OpenMM assembly
         │   ├── system_builder.py
         │   ├── relaxation.py
         │   ├── gaff.py
@@ -380,7 +475,7 @@ Each build produces:
 
 ---
 
-# Model Validity
+# Model Validity And Current Forcefield Status
 
 The relaxation pipeline is controlled by `forcefield.options.enabled` in `conf/forcefield/options/vacuum_stiff_backbone.yaml`:
 
@@ -388,11 +483,16 @@ The relaxation pipeline is controlled by `forcefield.options.enabled` in `conf/f
    - No OpenMM relaxation; output stays as deterministic construction + ordering result.
 
 2. `forcefield.options.enabled=true` (default)
-   - Staged restrained relaxation with frozen backbone heavy atoms.
-   - Uses AMBER-derived selector terms when available and generic RDKit-derived bonded terms as fallback.
-   - Supports optional heat/cool annealing schedule and staged restraint release.
+   - The architectural target is an all-atom GLYCAM/GAFF/connector OpenMM system.
+   - The intended optimization protocol is two-stage:
+     1. realistic bonded terms + soft repulsion for overlap resolution,
+     2. full realistic nonbonded interactions for final refinement.
+   - Hydrogens belong in the structure and forcefield domains for that path.
 
-This is still an incremental forcefield workflow, not a fully automated production-forcefield endpoint.
+Current implementation note:
+
+* The repository still contains intermediate migration code and should be treated as an incremental forcefield workflow, not yet the finished all-atom endpoint.
+* The guiding target is the domain model described above, not any temporary heavy-atom fallback that may still exist in the current implementation.
 
 ---
 
@@ -461,4 +561,21 @@ Used in chiral chromatography systems such as Chiralpak AD.
 
 # Status
 
-Migrated to a domain-oriented code layout (`topology/`, `structure/`, `forcefield/`, `ordering/`) with deterministic construction, selector attachment, ordering, QC, SDF export, multi-start optimization, and hybrid relaxation (AMBER bonded + soft repulsion, with RDKit-bonded fallback).
+Migrated to a domain-oriented code layout (`topology/`, `structure/`, `forcefield/`, `ordering/`) with deterministic construction, selector attachment, ordering, QC, SDF export, multi-start optimization, and an in-progress forcefield refactor.
+
+What is already true:
+
+* deterministic topology and structure construction,
+* domain-oriented code layout,
+* explicit hydrogen handling for derived all-atom outputs and fragment parameterization,
+* modular connector/selector parameterization groundwork.
+
+What remains the target and should guide future work:
+
+* topology may remain hydrogen-suppressed but chemically unambiguous,
+* structure domain should be explicit-H before force assignment,
+* forcefield domain should be explicit-H GLYCAM/GAFF/connector assembly in OpenMM,
+* optimization should be two-stage:
+  1. real bonded + soft-repulsion nonbonded overlap cleanup,
+  2. full realistic nonbonded refinement,
+* AMBER-format all-atom artifacts should be downstream products of that chemically complete model.

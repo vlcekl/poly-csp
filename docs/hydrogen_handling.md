@@ -273,23 +273,27 @@ After assembly, optional ordering, optional relaxation, and optional AMBER expor
 
 By default, it now does:
 
-1. `complete_with_hydrogens(mol_poly, add_coords=True, optimize="h_only")`
-2. keep heavy-atom coordinates fixed
-3. add explicit hydrogens to all chemically allowed sites
-4. optimize only hydrogen positions
-5. propagate metadata from each heavy atom to its added hydrogens
+1. resolve per-residue backbone state from topology metadata,
+2. choose an explicit-H residue template variant for each backbone residue,
+3. align each explicit-H residue template onto the current heavy-atom residue geometry,
+4. add backbone hydrogens explicitly from those residue templates,
+5. add selector, connector, and terminal-cap hydrogens in a targeted derived step,
+6. normalize the result into the forcefield-domain all-atom handoff with deterministic naming and a manifest.
 
 This metadata includes:
 
 - parent heavy atom index,
 - component classification,
 - selector instance metadata,
-- residue/site metadata when available
+- residue/site metadata when available,
+- residue-local backbone atom labels,
+- terminal-cap side when applicable,
+- deterministic short atom names and canonical semantic names.
 
-Why the hydrogen-only optimization is used:
+Important distinction:
 
-- it gives reasonable hydrogen orientations
-- it does not perturb the heavy-atom geometry produced by building, ordering, or relaxation
+- backbone hydrogens are no longer created by a late whole-molecule generic `AddHs()` pass,
+- selector, connector, and cap hydrogens may still use targeted generic completion in the derived all-atom output path.
 
 Result:
 
@@ -301,12 +305,14 @@ Result:
 When explicit hydrogens are written to PDB:
 
 - each hydrogen carries `_poly_csp_parent_heavy_idx`
-- PDB naming and residue assignment are derived from the parent heavy atom
+- atom naming prefers the all-atom handoff naming policy (`_poly_csp_atom_name` plus assigned `AtomPDBResidueInfo`)
+- residue assignment is still derived from the parent heavy atom / selector instance context
 
 Examples:
 
 - a backbone hydrogen attached to `O6` is assigned using the residue and label for `O6`
 - a selector hydrogen inherits the selector instance and local-index naming context from its parent heavy atom
+- a terminal-cap hydrogen inherits its left/right cap side from the parent heavy atom
 
 This keeps the all-atom output traceable back to the heavy-atom master.
 
@@ -323,6 +329,7 @@ These are removed before the canonical template is stored.
 
 ### Added permanently to derived molecules
 
+- explicit backbone hydrogens in the structure-domain / forcefield-domain handoff
 - explicit hydrogens in GAFF/AmberTools selector fragments
 - explicit hydrogens in GAFF/AmberTools capped-monomer connector fragments
 - explicit hydrogens in final `model.pdb` and `model.sdf`
@@ -360,7 +367,7 @@ Benefits:
 - fragment parameterization uses chemically complete all-atom inputs
 - final outputs are chemically complete all-atom structures
 
-This is a transitional architecture, but it is not a chemically naive one.
+This is still a staged architecture, but the backbone/all-atom boundary is now more explicit and better aligned with the long-term forcefield design.
 
 ## Current limitations
 
@@ -369,6 +376,7 @@ The reader should be aware of what is not yet true.
 - The full polymer OpenMM simulation path is not yet all-atom.
 - The current modular system builder still consumes heavy-atom terms only.
 - The whole-polymer AMBER export path is still separate from final all-atom completion.
+- Selector, connector, and cap hydrogens in the final all-atom output still rely on a targeted derived completion step rather than their own explicit-H structure templates.
 - Hydrogen-handling config keys exist, but current runtime behavior is effectively fixed to the intended default:
   - hydrogen-complete fragment parameterization,
   - strict exchangeable-site validation,
@@ -380,6 +388,6 @@ At present, the pipeline uses three hydrogen representations for three different
 
 1. implicit hydrogens on the canonical heavy-atom master for chemistry-aware assembly,
 2. explicit hydrogens on derived fragments for physically meaningful forcefield parameterization,
-3. explicit hydrogens on the final exported structure for chemically complete deliverables.
+3. explicit hydrogens on the structure/forcefield handoff and final exported structure for chemically complete deliverables.
 
 That separation is intentional and is the central hydrogen-handling principle of the current codebase.

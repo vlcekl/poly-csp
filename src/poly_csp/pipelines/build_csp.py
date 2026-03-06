@@ -22,9 +22,11 @@ from typing import List, Optional
 
 import hydra
 import numpy as np
+from rdkit import Chem
 from omegaconf import DictConfig, OmegaConf
 
-from poly_csp.structure.hydrogens import complete_with_hydrogens
+from poly_csp.forcefield.model import build_forcefield_molecule
+from poly_csp.structure.all_atom import build_structure_all_atom_molecule
 from poly_csp.structure.build_helix import build_backbone_coords
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.backbone import assign_conformer, polymerize
@@ -129,6 +131,9 @@ class BuildReport:
     output_export_formats: List[str]
     final_structure_variant: str
     heavy_debug_written: bool
+    all_atom_atom_count: Optional[int] = None
+    all_atom_backbone_h_count: Optional[int] = None
+    all_atom_manifest_schema_version: Optional[int] = None
     multi_opt_enabled: bool = False
     multi_opt_rank: int = 0
     multi_opt_total_starts: int = 0
@@ -288,6 +293,38 @@ def _heavy_atom_mask_from_rdkit(mol) -> np.ndarray:
 
 def _finite_or_none(value: float) -> Optional[float]:
     return float(value) if np.isfinite(value) else None
+
+
+def _finalize_output_molecule(
+    mol: Chem.Mol,
+    *,
+    helix: HelixSpec,
+    final_structure_variant: str,
+) -> tuple[Chem.Mol, dict[str, Optional[int]]]:
+    if final_structure_variant != "all_atom":
+        return Chem.Mol(mol), {
+            "all_atom_atom_count": None,
+            "all_atom_backbone_h_count": None,
+            "all_atom_manifest_schema_version": None,
+        }
+
+    structure_result = build_structure_all_atom_molecule(mol, helix_spec=helix)
+    forcefield_result = build_forcefield_molecule(structure_result.mol)
+    manifest = forcefield_result.manifest
+    stats = {
+        "all_atom_atom_count": int(forcefield_result.mol.GetNumAtoms()),
+        "all_atom_backbone_h_count": sum(
+            1
+            for entry in manifest
+            if entry.component == "backbone" and entry.atom_index != entry.parent_heavy_index
+        ),
+        "all_atom_manifest_schema_version": (
+            int(forcefield_result.mol.GetIntProp("_poly_csp_manifest_schema_version"))
+            if forcefield_result.mol.HasProp("_poly_csp_manifest_schema_version")
+            else None
+        ),
+    }
+    return forcefield_result.mol, stats
 
 
 def _hydrogen_handling_cfg(cfg: DictConfig) -> dict[str, object]:
@@ -727,14 +764,10 @@ def main(cfg: DictConfig) -> None:
         )
         amber_export_done = True
 
-    final_mol = (
-        complete_with_hydrogens(
-            mol_poly,
-            add_coords=True,
-            optimize="h_only" if bool(hydrogen_handling["optimize_added_hydrogens"]) else "none",
-        )
-        if final_structure_variant == "all_atom"
-        else mol_poly
+    final_mol, all_atom_stats = _finalize_output_molecule(
+        mol_poly,
+        helix=helix,
+        final_structure_variant=final_structure_variant,
     )
     heavy_debug_written = bool(write_heavy_debug and final_structure_variant == "all_atom")
 
@@ -775,6 +808,9 @@ def main(cfg: DictConfig) -> None:
         output_export_formats=output_export_formats,
         final_structure_variant=final_structure_variant,
         heavy_debug_written=heavy_debug_written,
+        all_atom_atom_count=all_atom_stats["all_atom_atom_count"],
+        all_atom_backbone_h_count=all_atom_stats["all_atom_backbone_h_count"],
+        all_atom_manifest_schema_version=all_atom_stats["all_atom_manifest_schema_version"],
         multi_opt_enabled=bool(ranked_results is not None and len(ranked_results) > 0),
         multi_opt_rank=1 if ranked_results else 0,
         multi_opt_total_starts=len(ranked_results) if ranked_results else 0,
@@ -838,14 +874,10 @@ def main(cfg: DictConfig) -> None:
         ranking_entries = []
         for result in ranked_results:
             rank_dir = _ensure_outdir(outdir / f"ranked_{result.rank:03d}")
-            rank_final_mol = (
-                complete_with_hydrogens(
-                    result.mol,
-                    add_coords=True,
-                    optimize="h_only" if bool(hydrogen_handling["optimize_added_hydrogens"]) else "none",
-                )
-                if final_structure_variant == "all_atom"
-                else result.mol
+            rank_final_mol, _ = _finalize_output_molecule(
+                result.mol,
+                helix=helix,
+                final_structure_variant=final_structure_variant,
             )
             if "pdb" in output_export_formats:
                 write_pdb_from_rdkit(rank_final_mol, rank_dir / "model.pdb")

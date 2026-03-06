@@ -7,57 +7,21 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 
+from poly_csp.topology.utils import (
+    copy_mol_props,
+    removed_old_indices,
+    residue_label_maps,
+    set_json_prop,
+    set_removed_old_indices,
+    set_residue_label_maps,
+)
+
 EndMode = Literal["open", "capped", "periodic"]
 
 _NO_CAP = {"none", "h", "hydrogen"}
 _METHYL_CAP = {"methyl", "methoxy"}
 _HYDROXYL_CAP = {"hydroxyl", "oh"}
 _ACETYL_CAP = {"acetyl"}
-
-
-def _copy_mol_props(src: Chem.Mol, dst: Chem.Mol) -> None:
-    props = src.GetPropsAsDict(includePrivate=True, includeComputed=False)
-    for key, value in props.items():
-        if isinstance(value, bool):
-            dst.SetBoolProp(key, bool(value))
-        elif isinstance(value, int):
-            dst.SetIntProp(key, int(value))
-        elif isinstance(value, float):
-            dst.SetDoubleProp(key, float(value))
-        else:
-            dst.SetProp(key, str(value))
-
-
-def _residue_label_maps(mol: Chem.Mol) -> list[dict[str, int]]:
-    if not mol.HasProp("_poly_csp_residue_label_map_json"):
-        raise ValueError("Missing _poly_csp_residue_label_map_json metadata on molecule.")
-    payload = json.loads(mol.GetProp("_poly_csp_residue_label_map_json"))
-    if not isinstance(payload, list):
-        raise ValueError("Invalid residue label map metadata format.")
-    maps: list[dict[str, int]] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            raise ValueError("Invalid residue label map entry.")
-        maps.append({str(k): int(v) for k, v in item.items()})
-    return maps
-
-
-def _set_residue_label_maps(mol: Chem.Mol, maps: list[dict[str, int]]) -> None:
-    mol.SetProp("_poly_csp_residue_label_map_json", json.dumps(maps))
-
-
-def _removed_old_indices(mol: Chem.Mol) -> list[int]:
-    if not mol.HasProp("_poly_csp_removed_old_indices_json"):
-        return []
-    payload = json.loads(mol.GetProp("_poly_csp_removed_old_indices_json"))
-    if not isinstance(payload, list):
-        raise ValueError("Invalid _poly_csp_removed_old_indices_json metadata.")
-    return [int(x) for x in payload]
-
-
-def _set_removed_old_indices(mol: Chem.Mol, removed: list[int]) -> None:
-    mol.SetProp("_poly_csp_removed_old_indices_json", json.dumps(sorted(set(removed))))
-
 
 def _coords_from_mol(mol: Chem.Mol) -> np.ndarray | None:
     if mol.GetNumConformers() == 0:
@@ -320,8 +284,8 @@ def apply_terminal_mode(
         raise ValueError(f"Unsupported end mode {mode!r}")
 
     cap_cfg = {str(k): str(v) for k, v in (caps or {}).items()}
-    maps = _residue_label_maps(mol)
-    removed_old = _removed_old_indices(mol)
+    maps = residue_label_maps(mol)
+    removed_old = removed_old_indices(mol)
     coords = _coords_from_mol(mol)
 
     rw = Chem.RWMol(mol)
@@ -370,16 +334,16 @@ def apply_terminal_mode(
 
     out = rw.GetMol()
     Chem.SanitizeMol(out)
-    _copy_mol_props(mol, out)
+    copy_mol_props(mol, out)
     _set_coords(out, coords)
-    _set_residue_label_maps(out, maps)
-    _set_removed_old_indices(out, removed_old)
+    set_residue_label_maps(out, maps)
+    set_removed_old_indices(out, removed_old)
 
     out.SetProp("_poly_csp_end_mode", mode)
     out.SetProp("_poly_csp_representation", representation)
-    out.SetProp("_poly_csp_end_caps_json", json.dumps(cap_cfg))
+    set_json_prop(out, "_poly_csp_end_caps_json", cap_cfg)
     out.SetBoolProp("_poly_csp_terminal_topology_pending", False)
-    out.SetProp("_poly_csp_terminal_meta_json", json.dumps(terminal_meta))
-    out.SetProp("_poly_csp_terminal_cap_indices_json", json.dumps(cap_indices))
+    set_json_prop(out, "_poly_csp_terminal_meta_json", terminal_meta)
+    set_json_prop(out, "_poly_csp_terminal_cap_indices_json", cap_indices)
 
     return out

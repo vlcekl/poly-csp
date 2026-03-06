@@ -10,6 +10,7 @@ from poly_csp.structure.hydrogens import complete_with_hydrogens
 from poly_csp.topology.backbone import assign_conformer, polymerize
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
+from poly_csp.topology.atom_mapping import attachment_instance_maps
 from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
 
 
@@ -79,3 +80,45 @@ def test_complete_with_hydrogens_preserves_heavy_coords_and_metadata() -> None:
     assert len(amide_h) == 1
     assert amide_h[0].GetIntProp("_poly_csp_parent_heavy_idx") == amide_n.GetIdx()
     assert amide_h[0].GetProp("_poly_csp_component") == "connector"
+
+
+def test_complete_with_hydrogens_only_on_atoms_targets_selector_hydrogens() -> None:
+    template = make_glucose_template("amylose", monomer_representation="natural_oh")
+    selector = make_35_dmpc_template()
+
+    mol = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
+    coords = build_backbone_coords(template, _helix(), dp=1)
+    mol = assign_conformer(mol, coords)
+    mol = attach_selector(
+        mol_polymer=mol,
+        template=template,
+        residue_index=0,
+        site="C6",
+        selector=selector,
+    )
+
+    selector_atoms = sorted(
+        {
+            atom_idx
+            for mapping in attachment_instance_maps(mol).values()
+            for atom_idx in mapping.values()
+        }
+    )
+    targeted = complete_with_hydrogens(
+        mol,
+        add_coords=True,
+        optimize="h_only",
+        only_on_atoms=selector_atoms,
+    )
+
+    maps = json.loads(targeted.GetProp("_poly_csp_residue_label_map_json"))
+    for label in ("O1", "O2", "O3", "O4", "O6"):
+        oxygen = targeted.GetAtomWithIdx(maps[0][label])
+        assert sum(1 for nbr in oxygen.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
+
+    amide_n = next(
+        atom for atom in targeted.GetAtoms()
+        if atom.HasProp("_poly_csp_connector_role")
+        and atom.GetProp("_poly_csp_connector_role") == "amide_n"
+    )
+    assert any(nbr.GetAtomicNum() == 1 for nbr in amide_n.GetNeighbors())
