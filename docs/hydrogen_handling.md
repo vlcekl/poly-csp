@@ -1,393 +1,135 @@
 # Hydrogen Handling in the Current Pipeline
 
-This document describes how the current `poly_csp` pipeline handles hydrogens, step by step.
+This document describes the current Phase 1 hydrogen model.
 
-The key design choice is:
+The boundary is now explicit:
 
-- The canonical working molecule for assembly, ordering, QC, and current OpenMM relaxation is still hydrogen-suppressed.
-- "Hydrogen-suppressed" does not mean chemically incomplete. Exchangeable sites are represented by correct valence and correct `GetTotalNumHs()` counts on the heavy atoms.
-- Explicit hydrogen atoms are introduced only in derived molecules:
-  - temporarily during template embedding,
-  - for GAFF/AmberTools fragment parameterization,
-  - for the final all-atom structure outputs.
+- The topology domain is hydrogen-suppressed.
+- The structure domain is the first canonical all-atom representation.
+- The forcefield-domain handoff validates and names that all-atom structure; it does not rebuild it.
+- Backbone hydrogens never come from a late whole-molecule `AddHs()` step.
 
-For a molecular modeler, the important consequence is that the runtime topology is currently a chemically correct heavy-atom graph, while all-atom structures are generated as derived views when needed.
+## Core Rules
 
-## Terminology
+1. Topology preserves chemistry and residue state, not explicit backbone hydrogens.
+2. Structure builds the full all-atom backbone directly from explicit-H residue templates.
+3. If a representation or residue state removes atoms, geometry must be derived from the complete chemically valid structure first and pruned afterward.
+4. `complete_with_hydrogens()` is no longer part of backbone construction. It remains only for isolated fragment-preparation utilities.
 
-### Implicit hydrogen
+## Stage 1: Glucose monomer templates
 
-An RDKit heavy atom can carry hydrogen count information without an explicit hydrogen atom being present in the graph. In this codebase, most working molecules use this representation.
+`make_glucose_template()` in [src/poly_csp/topology/monomers.py](/home/lukas/work/projects/poly_csp/src/poly_csp/topology/monomers.py) is still topology-domain code, so the stored template is heavy-atom only.
 
-Example:
+Important details:
 
-- a glucose hydroxyl oxygen can exist as an oxygen atom with `GetTotalNumHs() == 1`
-- there is no separate hydrogen atom in the molecule graph at that stage
+1. The mapped SMILES are authored as complete `natural_oh` glucose monomers for amylose and cellulose.
+2. Hydroxyl oxygens are normalized back to implicit-hydrogen behavior after SMILES parsing, so later bond formation can consume those hydrogens through valence and sanitization.
+3. Embedding is performed on a temporary explicit-H copy.
+4. `anhydro` is not embedded separately. The code embeds the full `natural_oh` structure first and then removes `O1`.
 
-### Explicit hydrogen
+That last point is deliberate. The anhydro geometry is derived from the complete molecular structure before removing the designated atom, so `C1` keeps the correct tetrahedral geometry.
 
-A hydrogen atom is present as its own atom in the molecular graph and has coordinates, connectivity, and atom metadata.
+## Stage 2: Heavy-atom topology assembly
 
-This is the representation used for:
+Topology assembly is still heavy-atom only:
 
-- temporary 3D embedding support,
-- AmberTools fragment parameterization,
-- final `model.pdb` and `model.sdf` outputs by default.
+1. `polymerize()` builds the `O4(i)-C1(i+1)` heavy-atom graph.
+2. `apply_terminal_mode()` records terminal intent and periodic topology edits.
+3. `resolve_residue_template_states()` determines, residue by residue, which atoms and hydrogens must exist in the later explicit-H structure.
 
-### Heavy-atom master
+At this stage:
 
-This is the canonical molecule passed through:
+- free hydroxyls are still implicit on heavy atoms,
+- internal `natural_oh` residues may have `O1` removed,
+- selector substitution state is tracked from topology metadata and graph connectivity.
 
-- monomer assembly,
-- polymerization,
-- terminal editing,
-- selector attachment,
-- ordering,
-- current restrained relaxation.
+## Stage 3: Explicit-H backbone templates
 
-It is hydrogen-suppressed but chemically valid.
+Backbone hydrogens are introduced in the structure domain through [src/poly_csp/structure/templates.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/templates.py).
 
-## Stage 1: Monomer template definition
+The flow is:
 
-The glucose monomer templates are authored with mapped SMILES that explicitly mark hydroxyl-bearing atoms:
-
-- `O2`, `O3`, `O4`, `O6` are written as `[OH:...]`
-- `O1` is also `[OH:...]` in `natural_oh`
-- ring oxygen `O5` remains non-protonated
-
-Why this is done:
-
-- it preserves the intended chemistry at template definition time
-- it prevents the old failure mode where bare bracketed heteroatoms lost their exchangeable hydrogen semantics
-
-However, RDKit interprets bracketed `[OH]` atoms as fixed-hydrogen atoms. That is not suitable for later bond formation, because a fixed `[OH]` oxygen cannot simply "lose" its hydrogen when a glycosidic or selector bond is formed.
-
-So the monomer loader immediately normalizes those hydroxyl oxygens back to implicit-hydrogen behavior:
-
-- `SetNoImplicit(False)`
-- `SetNumExplicitHs(0)`
-- `SanitizeMol()`
-
-Result:
-
-- the monomer template still reports one total hydrogen on free hydroxyl oxygens
-- but the hydrogen is implicit, not a separate atom
-- later bond formation can consume that hydrogen automatically through sanitization
-
-## Stage 2: Temporary explicit hydrogens for template embedding
-
-The monomer template is embedded as follows:
-
-1. `Chem.AddHs(mol)` creates an all-atom temporary copy
-2. RDKit embeds and optimizes that all-atom copy
-3. `Chem.RemoveHs(..., sanitize=True)` strips the explicit hydrogens again
-
-This happens for glucose templates and also for built-in selector templates such as 3,5-DMPC and TMB.
-
-Why this is done:
-
-- RDKit generally embeds and optimizes better when explicit hydrogens are present
-- the project still wants a hydrogen-suppressed master after embedding
-
-Result:
-
-- template coordinates come from an all-atom embedding
-- the stored template molecule returns to a heavy-atom representation
-- chemically important hydrogen counts remain encoded implicitly
-
-## Stage 3: Backbone polymerization
-
-Polymerization duplicates the monomer template and creates `O4(i)-C1(i+1)` glycosidic bonds.
-
-Important point:
-
-- there are still no explicit hydrogen atoms in the working polymer graph
-- hydrogen consumption is represented by a change in the heavy atom valence model
-
-What happens chemically:
-
-- when `O4` forms the glycosidic bond, RDKit sanitization reduces its hydrogen count from 1 to 0
-- no explicit hydrogen atom is deleted, because none exists in the graph
-
-For `natural_oh` representations, the code also removes `O1` from every residue that receives an incoming glycosidic bond.
-
-This is a heavy-atom deletion, not a hydrogen deletion.
-
-Why `O1` is removed:
-
-- the `natural_oh` monomer includes a reducing-end `O1`
-- internal residues in a 1->4 polymer should not retain that extra heavy atom
-- removing `O1` keeps `C1` chemically valid after polymerization
-
-Result:
-
-- internal residues have the expected heavy-atom connectivity
-- `O4` no longer reports a hydroxyl hydrogen after linkage
-- the polymer master remains hydrogen-suppressed
-
-## Stage 4: Terminal editing
-
-After polymerization, terminal policy is applied.
-
-### `open`
-
-No topology change. Hydrogen state stays implicit on the heavy-atom master.
-
-### `periodic`
-
-The code:
-
-- removes `res0:O1` for `natural_oh` chains
-- adds the head-to-tail `O4(last)-C1(first)` bond
-
-Again:
-
-- the removed atom is a heavy atom (`O1`), not an explicit hydrogen
-- the loss of hydroxyl character on the participating oxygen is handled implicitly by sanitization
-
-### `capped`
-
-The code adds heavy-atom cap fragments such as:
-
-- methyl/methoxy,
-- hydroxyl,
-- acetyl
-
-These caps are added as heavy atoms only. Their hydrogens are not made explicit at this stage.
-
-Why:
-
-- the heavy-atom master remains the canonical deterministic graph
-- correct hydrogen counts are still implied by valence and sanitization
-
-## Stage 5: Selector attachment
-
-Selector attachment also operates on the hydrogen-suppressed master.
-
-The sequence is:
-
-1. combine the polymer and selector heavy-atom graphs
-2. add the bond from the sugar OH oxygen to the selector attachment atom
-3. remove the selector dummy atom `[*]`
-4. sanitize the molecule
-
-Hydrogen effects:
-
-- the sugar attachment oxygen loses its implicit hydroxyl hydrogen during sanitization
-- the DMPC carbamate nitrogen keeps one total hydrogen
-- no explicit hydrogens are added or removed in the graph itself at this stage
-
-This is now validated explicitly:
-
-- attachment oxygen must have `GetTotalNumHs() == 0`
-- DMPC connector `amide_n` must have `GetTotalNumHs() == 1`
-
-Why the pipeline does not attach on an all-atom graph:
-
-- explicit-hydrogen assembly would enlarge the atom-mapping and ordering surface significantly
-- the current heavy-atom master already carries enough chemistry to perform the bond-forming step correctly
-
-## Stage 6: Donor and acceptor logic
-
-Selector donor detection now uses total hydrogen count, not only explicit hydrogen neighbors.
-
-That matters because:
-
-- the runtime selector templates are usually hydrogen-suppressed
-- an amide `N-H` donor must still be recognized even when the H atom is not explicit
-
-So donor inference uses:
-
-- `GetTotalNumHs() > 0`
-
-This lets the heavy-atom master remain chemically useful for:
-
-- selector registry auto-detection,
-- ordering heuristics,
-- hydrogen-bond-like QC metrics.
-
-## Stage 7: Current runtime forcefield and relaxation state
-
-The current OpenMM assembly path still works on the hydrogen-suppressed polymer master.
-
-That means:
-
-- ordering runs on the heavy-atom graph
-- QC is evaluated from the heavy-atom graph
-- current restrained relaxation uses the heavy-atom graph
-- the modular force builder still transfers only heavy-atom bonded terms into the runtime system
-
-This is deliberate for now. The project has not yet moved the full polymer simulation path to an all-atom system.
-
-## Stage 8: Explicit hydrogens for AmberTools fragment parameterization
-
-Hydrogens become fully explicit when the code prepares selector and connector fragments for AmberTools.
-
-This is the most important transition in the current hydrogen-aware design.
-
-### 8.1 Isolated selector parameterization
-
-For an isolated selector fragment:
-
-1. dummy atoms are replaced with real hydrogen atoms, because Antechamber cannot type atomic number 0
-2. `complete_with_hydrogens()` is called on the fragment
-3. hydrogen coordinates are generated
-4. a hydrogen-only local optimization is run, with heavy atoms fixed
-5. the all-atom fragment is written to PDB and passed into Antechamber/Parmchk2/tleap
-
-### 8.2 Capped-monomer connector parameterization
-
-For connector extraction:
-
-1. the code builds a heavy-atom capped monomer with one attached selector
-2. that heavy-atom fragment is sent through the same GAFF fragment preparation path
-3. explicit hydrogens are added before any AmberTools file generation
-4. AmberTools produces an all-atom fragment prmtop
-5. the code maps the all-atom prmtop back to heavy-atom semantic roles and extracts only the connector bonded terms needed by the current runtime builder
-
-Why explicit hydrogens are required here:
-
-- charge derivation and atom typing need chemically complete fragments
-- carbamate and hydroxyl protonation states must be represented explicitly
-- the source parameterization chemistry should be physically meaningful even if the current runtime system is still heavy-atom
-
-## Stage 9: Optional AMBER export of the whole build
-
-The current `export_amber_artifacts()` path is separate from final structure completion.
-
-Important detail:
-
-- the main build pipeline calls optional AMBER export before final all-atom completion
-- the molecule passed into `export_amber_artifacts()` is still the heavy-atom master
-
-For the current residue-aware GLYCAM path, this is acceptable because:
-
-- tleap assembles the polysaccharide backbone from residue templates, not from a fully hydrogenated polymer PDB
-- selector fragment parameterization is already handled through a separate explicit-hydrogen GAFF path
-
-So the AMBER export layer is not currently the place where the whole polymer gets hydrogen-completed.
-
-## Stage 10: Final all-atom structure completion
-
-After assembly, optional ordering, optional relaxation, and optional AMBER export, the pipeline generates the final output structure.
-
-By default, it now does:
-
-1. resolve per-residue backbone state from topology metadata,
-2. choose an explicit-H residue template variant for each backbone residue,
-3. align each explicit-H residue template onto the current heavy-atom residue geometry,
-4. add backbone hydrogens explicitly from those residue templates,
-5. add selector, connector, and terminal-cap hydrogens in a targeted derived step,
-6. normalize the result into the forcefield-domain all-atom handoff with deterministic naming and a manifest.
-
-This metadata includes:
-
-- parent heavy atom index,
-- component classification,
-- selector instance metadata,
-- residue/site metadata when available,
-- residue-local backbone atom labels,
-- terminal-cap side when applicable,
-- deterministic short atom names and canonical semantic names.
-
-Important distinction:
-
-- backbone hydrogens are no longer created by a late whole-molecule generic `AddHs()` pass,
-- selector, connector, and cap hydrogens may still use targeted generic completion in the derived all-atom output path.
-
-Result:
-
-- `model.pdb` and `model.sdf` are all-atom by default
-- optional `model_heavy.pdb` and `model_heavy.sdf` can still be emitted for debugging
-
-## Stage 11: PDB naming and residue assignment for derived hydrogens
-
-When explicit hydrogens are written to PDB:
-
-- each hydrogen carries `_poly_csp_parent_heavy_idx`
-- atom naming prefers the all-atom handoff naming policy (`_poly_csp_atom_name` plus assigned `AtomPDBResidueInfo`)
-- residue assignment is still derived from the parent heavy atom / selector instance context
+1. `load_explicit_backbone_template()` starts from the deterministic heavy-atom glucose template and adds explicit hydrogens.
+2. Hydrogen coordinates are optimized with heavy atoms fixed.
+3. `build_residue_variant()` removes only the atoms or hydrogens that the resolved residue state says should be absent.
 
 Examples:
 
-- a backbone hydrogen attached to `O6` is assigned using the residue and label for `O6`
-- a selector hydrogen inherits the selector instance and local-index naming context from its parent heavy atom
-- a terminal-cap hydrogen inherits its left/right cap side from the parent heavy atom
+- missing `O1` for internal `natural_oh` residues,
+- missing `HO4` for outgoing glycosidic bonds,
+- missing `HO2` / `HO3` / `HO6` for substituted sites,
+- missing `C1` hydrogen when a left cap occupies that site.
 
-This keeps the all-atom output traceable back to the heavy-atom master.
+The geometry rule is the same as for monomers: build the full chemically complete residue first, then prune. The code never embeds a partially deleted residue and treats that geometry as authoritative.
 
-## What is added, removed, or only reinterpreted
+## Stage 4: Direct all-atom backbone construction
 
-This is the most concise summary of the hydrogen lifecycle.
+`build_backbone_structure()` in [src/poly_csp/structure/backbone_builder.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/backbone_builder.py) is now the canonical backbone builder.
 
-### Added temporarily
+It does three things:
 
-- explicit hydrogens during monomer embedding
-- explicit hydrogens during selector template embedding
+1. fit one residue-local backbone pose that is compatible with the requested helix screw transform,
+2. apply that same transform to every atom in each residue variant,
+3. assemble the full explicit-H backbone and terminal caps in the structure domain.
 
-These are removed before the canonical template is stored.
+Current local linkage constraints are:
 
-### Added permanently to derived molecules
+- `O4-C1` bond length,
+- `C4-O4-C1` donor angle,
+- `O4-C1-O5` acceptor angle,
+- `O4-C1-C2` acceptor-side stereochemistry angle.
 
-- explicit backbone hydrogens in the structure-domain / forcefield-domain handoff
-- explicit hydrogens in GAFF/AmberTools selector fragments
-- explicit hydrogens in GAFF/AmberTools capped-monomer connector fragments
-- explicit hydrogens in final `model.pdb` and `model.sdf`
+The builder also exposes per-linkage diagnostics for:
 
-### Never present as explicit atoms in the canonical runtime master
+- the same covalent geometry terms,
+- `O4···H1` separation, which protects against the recent anomeric-placement regression.
 
-- hydroxyl hydrogens on glucose
-- carbamate `N-H` on DMPC
-- cap hydrogens on terminal groups
+There is no heavy-backbone retrofit step and no late generic backbone hydrogen placement.
 
-These are represented implicitly until final all-atom completion.
+## Stage 5: Selector attachment
 
-### Removed as heavy atoms
+Selector templates now live in [src/poly_csp/structure/selector_library/](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/selector_library) as explicit-H fragments.
 
-- `O1` on incoming-linkage residues in `natural_oh` polymerization
-- `O1` on residue 0 in `periodic` mode for `natural_oh`
-- selector dummy atom `[*]` during attachment
+When `attach_selector()` runs:
 
-### Not explicitly removed because they were never explicit atoms
+1. it starts from the all-atom backbone structure,
+2. it consumes the sugar attachment hydrogen explicitly if present,
+3. it bonds in the selector fragment,
+4. it propagates selector and connector metadata onto attached hydrogens.
 
-- the sugar hydroxyl hydrogen consumed during glycosidic bond formation
-- the sugar hydroxyl hydrogen consumed during selector attachment
+So selector attachment is no longer a heavy-atom-only chemistry edit followed by late hydrogen completion.
 
-These are represented by a drop in `GetTotalNumHs()` after sanitization.
+## Stage 6: Forcefield-domain handoff
 
-## Why the pipeline is designed this way
+`build_forcefield_molecule()` in [src/poly_csp/forcefield/model.py](/home/lukas/work/projects/poly_csp/src/poly_csp/forcefield/model.py) performs the structure-to-forcefield handoff.
 
-The current approach balances chemical correctness with implementation scope.
+It validates that:
 
-Benefits:
+1. all hydrogens are explicit,
+2. hydrogens record `_poly_csp_parent_heavy_idx`,
+3. backbone atoms and hydrogens carry the metadata needed for naming and later parameter mapping.
 
-- the master graph stays small and deterministic
-- atom mapping for selectors and residues remains simpler
-- bond-forming chemistry is still represented correctly through implicit hydrogen counts
-- fragment parameterization uses chemically complete all-atom inputs
-- final outputs are chemically complete all-atom structures
+It then builds the deterministic atom manifest and export naming. It must not alter chemistry or coordinates.
 
-This is still a staged architecture, but the backbone/all-atom boundary is now more explicit and better aligned with the long-term forcefield design.
+## Where Generic Hydrogen Completion Still Exists
 
-## Current limitations
+`complete_with_hydrogens()` in [src/poly_csp/structure/hydrogens.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/hydrogens.py) still exists, but it is no longer part of canonical backbone construction.
 
-The reader should be aware of what is not yet true.
+Its remaining use is isolated fragment preparation, for example:
 
-- The full polymer OpenMM simulation path is not yet all-atom.
-- The current modular system builder still consumes heavy-atom terms only.
-- The whole-polymer AMBER export path is still separate from final all-atom completion.
-- Selector, connector, and cap hydrogens in the final all-atom output still rely on a targeted derived completion step rather than their own explicit-H structure templates.
-- Hydrogen-handling config keys exist, but current runtime behavior is effectively fixed to the intended default:
-  - hydrogen-complete fragment parameterization,
-  - strict exchangeable-site validation,
-  - all-atom final output by default.
+- AmberTools / GAFF fragment setup in [src/poly_csp/forcefield/gaff.py](/home/lukas/work/projects/poly_csp/src/poly_csp/forcefield/gaff.py),
+- standalone hydrogen-completion utilities and tests.
 
-## Bottom line
+That distinction matters:
 
-At present, the pipeline uses three hydrogen representations for three different jobs:
+- backbone and final structure construction are template-driven,
+- generic hydrogen completion is now only a fragment utility.
 
-1. implicit hydrogens on the canonical heavy-atom master for chemistry-aware assembly,
-2. explicit hydrogens on derived fragments for physically meaningful forcefield parameterization,
-3. explicit hydrogens on the structure/forcefield handoff and final exported structure for chemically complete deliverables.
+## Summary
 
-That separation is intentional and is the central hydrogen-handling principle of the current codebase.
+The current hydrogen model is:
+
+1. heavy-atom topology for assembly and residue-state resolution,
+2. direct explicit-H structure construction from complete templates,
+3. validated all-atom forcefield handoff with deterministic naming,
+4. no compatibility shim that rebuilds backbone hydrogens after the fact.

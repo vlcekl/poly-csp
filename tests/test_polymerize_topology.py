@@ -5,7 +5,8 @@ import numpy as np
 from rdkit import Chem
 
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
 
 
 def test_polymerize_atom_count_and_link_bonds() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.selectors import SelectorRegistry, selector_from_smiles
 
 

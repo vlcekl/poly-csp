@@ -80,6 +80,7 @@ def load_explicit_backbone_template(
     polymer: PolymerKind,
     representation: MonomerRepresentation,
 ) -> ExplicitResidueTemplate:
+    """Return the complete explicit-H residue template for a backbone representation."""
     key = (str(polymer), str(representation))
     cached = _BASE_TEMPLATE_CACHE.get(key)
     if cached is not None:
@@ -151,6 +152,13 @@ def build_residue_variant(
     base_template: ExplicitResidueTemplate,
     state: ResidueTemplateState,
 ) -> ExplicitResidueTemplate:
+    """Prune a complete explicit-H residue template into the exact residue-state variant.
+
+    The geometry rule is deliberate: build the full chemically complete residue
+    first, then remove atoms or hydrogens that the resolved topology state says
+    should be absent. The variant geometry is never embedded from an already
+    pruned graph.
+    """
     remove_indices: set[int] = set()
 
     if not state.has_o1 and "O1" in base_template.heavy_label_to_idx:

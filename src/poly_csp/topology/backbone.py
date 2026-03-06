@@ -5,9 +5,7 @@ import json
 from bisect import bisect_left
 from typing import Literal
 
-import numpy as np
 from rdkit import Chem
-from rdkit.Geometry import Point3D
 
 from poly_csp.topology.monomers import GlucoseMonomerTemplate
 
@@ -61,7 +59,7 @@ def polymerize(
     linkage: Literal["1-4"] = "1-4",
     anomer: Literal["alpha", "beta"] = "beta",
 ) -> Chem.Mol:
-    """Repeat monomer dp times and add glycosidic bonds deterministically."""
+    """Topology-domain assembly of the heavy-atom `O4(i)-C1(i+1)` master graph."""
     if dp < 1:
         raise ValueError(f"dp must be >= 1, got {dp}")
     if linkage != "1-4":
@@ -97,24 +95,3 @@ def polymerize(
     Chem.SanitizeMol(mol)
     _set_polymer_metadata(mol, template, dp, removed_sorted)
     return mol
-
-
-def assign_conformer(mol: Chem.Mol, coords: np.ndarray) -> Chem.Mol:
-    """Attach coords (N,3) to mol as a single conformer."""
-    xyz = np.asarray(coords, dtype=float)
-    if xyz.ndim != 2 or xyz.shape[1] != 3:
-        raise ValueError(f"Expected coords shape (N,3); got {xyz.shape}")
-    if xyz.shape[0] != mol.GetNumAtoms():
-        raise ValueError(
-            f"Atom count mismatch: coords has {xyz.shape[0]}, mol has {mol.GetNumAtoms()}."
-        )
-
-    out = Chem.Mol(mol)
-    out.RemoveAllConformers()
-
-    conf = Chem.Conformer(out.GetNumAtoms())
-    for i in range(out.GetNumAtoms()):
-        x, y, z = xyz[i]
-        conf.SetAtomPosition(i, Point3D(float(x), float(y), float(z)))
-    out.AddConformer(conf, assignId=True)
-    return out

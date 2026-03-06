@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import SelectorPoseSpec
 from poly_csp.structure.local_frames import compute_residue_local_frame, pose_selector_in_frame
 

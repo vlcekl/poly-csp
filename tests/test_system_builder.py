@@ -6,12 +6,13 @@ from poly_csp.forcefield.connectors import (
     extract_linkage_params_from_system,
 )
 from poly_csp.forcefield.system_builder import create_system
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.atom_mapping import build_atom_map
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 
 
 def _helix() -> HelixSpec:
@@ -103,7 +104,6 @@ def test_create_system_particle_count_matches_molecule() -> None:
     mol = assign_conformer(mol, build_backbone_coords(template, _helix(), dp=2))
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,

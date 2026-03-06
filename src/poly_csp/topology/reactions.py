@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 
-from poly_csp.topology.monomers import GlucoseMonomerTemplate
 from poly_csp.topology.selectors import SelectorTemplate
-from poly_csp.topology.utils import copy_mol_props, residue_label_maps
+from poly_csp.topology.utils import copy_mol_props, residue_label_maps, terminal_cap_indices
 from poly_csp.config.schema import Site
 
 
@@ -113,21 +113,126 @@ def residue_label_global_index(mol: Chem.Mol, residue_index: int, label: str) ->
     return int(mapping[label])
 
 
+def _shift_indices_after_removal(indices: list[int], remove_idx: int) -> list[int]:
+    out: list[int] = []
+    for atom_idx in indices:
+        if atom_idx == remove_idx:
+            continue
+        out.append(int(atom_idx - 1) if atom_idx > remove_idx else int(atom_idx))
+    return out
+
+
+def _update_backbone_index_metadata_after_removal(
+    mol: Chem.Mol,
+    remove_idx: int,
+) -> None:
+    maps = residue_label_maps(mol)
+    shifted_maps: list[dict[str, int]] = []
+    for mapping in maps:
+        shifted: dict[str, int] = {}
+        for label, atom_idx in mapping.items():
+            shifted[label] = int(atom_idx - 1) if atom_idx > remove_idx else int(atom_idx)
+        shifted_maps.append(shifted)
+    mol.SetProp("_poly_csp_residue_label_map_json", json.dumps(shifted_maps))
+
+    if mol.HasProp("_poly_csp_terminal_cap_indices_json"):
+        cap_indices = terminal_cap_indices(mol)
+        mol.SetProp(
+            "_poly_csp_terminal_cap_indices_json",
+            json.dumps(
+                {
+                    "left": _shift_indices_after_removal(cap_indices.get("left", []), remove_idx),
+                    "right": _shift_indices_after_removal(cap_indices.get("right", []), remove_idx),
+                }
+            ),
+        )
+
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() != 1:
+            continue
+        if not atom.HasProp("_poly_csp_parent_heavy_idx"):
+            continue
+        parent_idx = int(atom.GetIntProp("_poly_csp_parent_heavy_idx"))
+        if parent_idx > remove_idx:
+            atom.SetIntProp("_poly_csp_parent_heavy_idx", parent_idx - 1)
+
+
+def _consume_attachment_hydrogen(
+    mol: Chem.Mol,
+    oxygen_idx: int,
+    coords: np.ndarray | None,
+) -> tuple[Chem.Mol, np.ndarray | None]:
+    oxygen = mol.GetAtomWithIdx(int(oxygen_idx))
+    h_neighbors = [int(nbr.GetIdx()) for nbr in oxygen.GetNeighbors() if nbr.GetAtomicNum() == 1]
+    if len(h_neighbors) > 1:
+        raise ValueError(
+            "Attachment oxygen has more than one explicit hydrogen; attachment is ambiguous."
+        )
+    if not h_neighbors:
+        return Chem.Mol(mol), coords
+
+    remove_idx = h_neighbors[0]
+    rw = Chem.RWMol(mol)
+    rw.RemoveAtom(int(remove_idx))
+    out = rw.GetMol()
+    Chem.SanitizeMol(out)
+    copy_mol_props(mol, out)
+    _update_backbone_index_metadata_after_removal(out, remove_idx)
+    if coords is not None:
+        coords = np.delete(coords, int(remove_idx), axis=0)
+    return out, coords
+
+
+def _annotate_selector_hydrogens(mol: Chem.Mol, instance_id: int) -> None:
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() != 1:
+            continue
+        if not atom.HasProp("_poly_csp_selector_instance"):
+            continue
+        if int(atom.GetIntProp("_poly_csp_selector_instance")) != instance_id:
+            continue
+        if atom.GetDegree() != 1:
+            continue
+        parent = atom.GetNeighbors()[0]
+        parent_idx = int(parent.GetIdx())
+        atom.SetIntProp("_poly_csp_parent_heavy_idx", parent_idx)
+        for key in (
+            "_poly_csp_component",
+            "_poly_csp_selector_instance",
+            "_poly_csp_residue_index",
+            "_poly_csp_site",
+            "_poly_csp_connector_atom",
+            "_poly_csp_connector_role",
+            "_poly_csp_selector_name",
+            "_poly_csp_linkage_type",
+        ):
+            if not parent.HasProp(key):
+                continue
+            if key in {
+                "_poly_csp_selector_instance",
+                "_poly_csp_residue_index",
+                "_poly_csp_connector_atom",
+            }:
+                atom.SetIntProp(key, int(parent.GetIntProp(key)))
+            else:
+                atom.SetProp(key, parent.GetProp(key))
+
+
 def attach_selector(
     mol_polymer: Chem.Mol,
-    template: GlucoseMonomerTemplate,
     residue_index: int,
     site: Site,
     selector: SelectorTemplate,
+    *,
     mode: Literal["bond_from_OH_oxygen"] = "bond_from_OH_oxygen",
     linkage_type: str | None = None,
     place_coords: bool = True,
 ) -> Chem.Mol:
-    """Attach selector to polymer with optional deterministic coordinate placement.
+    """Attach an explicit-H selector fragment to the structure-domain polymer.
 
-    The topology step always performs bond creation and metadata tagging.
-    When ``place_coords`` is true and input coordinates exist, selector
-    coordinates are also placed through ``structure.alignment``.
+    The chemistry edit consumes the sugar attachment hydrogen explicitly when it
+    exists, preserves selector/connector metadata, and optionally performs the
+    structure-domain coordinate placement step through `structure.alignment`.
     """
     if mode != "bond_from_OH_oxygen":
         raise ValueError(f"Unsupported attachment mode: {mode!r}")
@@ -135,14 +240,12 @@ def attach_selector(
     dp = (
         int(mol_polymer.GetIntProp("_poly_csp_dp"))
         if mol_polymer.HasProp("_poly_csp_dp")
-        else (mol_polymer.GetNumAtoms() // template.mol.GetNumAtoms())
+        else len(residue_label_maps(mol_polymer))
     )
     if residue_index < 0 or residue_index >= dp:
         raise ValueError(f"residue_index {residue_index} out of range [0, {dp})")
 
     oxygen_label = site_to_oxygen_label(site)
-    if oxygen_label not in template.site_idx:
-        raise ValueError(f"Site {site} is not available in template.site_idx")
     resolved_linkage_type = linkage_type or selector.linkage_type
 
     sugar_o_global = residue_label_global_index(mol_polymer, residue_index, oxygen_label)
@@ -153,13 +256,19 @@ def attach_selector(
             mol_polymer.GetConformer(0).GetPositions(), dtype=float
         ).reshape((-1, 3))
 
-    rw = Chem.RWMol(Chem.CombineMols(mol_polymer, selector.mol))
-    offset = mol_polymer.GetNumAtoms()
+    working_polymer, existing_coords = _consume_attachment_hydrogen(
+        mol_polymer,
+        sugar_o_global,
+        existing_coords,
+    )
+
+    rw = Chem.RWMol(Chem.CombineMols(working_polymer, selector.mol))
+    offset = working_polymer.GetNumAtoms()
     attach_global = offset + selector.attach_atom_idx
 
     prev_count = (
-        int(mol_polymer.GetIntProp("_poly_csp_selector_count"))
-        if mol_polymer.HasProp("_poly_csp_selector_count")
+        int(working_polymer.GetIntProp("_poly_csp_selector_count"))
+        if working_polymer.HasProp("_poly_csp_selector_count")
         else 0
     )
     instance_id = prev_count + 1
@@ -179,8 +288,9 @@ def attach_selector(
 
     mol = rw.GetMol()
     Chem.SanitizeMol(mol)
-    copy_mol_props(mol_polymer, mol)
+    copy_mol_props(working_polymer, mol)
     mol.SetIntProp("_poly_csp_selector_count", instance_id)
+    _annotate_selector_hydrogens(mol, instance_id)
     _validate_attachment_hydrogen_counts(
         mol=mol,
         sugar_o_global=sugar_o_global,
@@ -199,7 +309,7 @@ def attach_selector(
 
         selector_coords = place_selector_with_ideal_linkage(
             existing_coords=existing_coords,
-            mol_polymer=mol_polymer,
+            mol_polymer=working_polymer,
             residue_index=residue_index,
             site=site,
             selector=selector,

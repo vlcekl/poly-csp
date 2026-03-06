@@ -93,6 +93,7 @@ def _is_site_substituted(
 
 
 def resolve_residue_template_states(mol: Chem.Mol) -> list[ResidueTemplateState]:
+    """Resolve the exact residue-local chemistry needed by the structure-domain builder."""
     maps = residue_label_maps(mol)
     polymer = _molecule_polymer(mol)
     representation = _molecule_representation(mol)

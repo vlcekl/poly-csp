@@ -20,16 +20,6 @@ class GlucoseMonomerTemplate:
     representation: MonomerRepresentation
 
 
-_AMYLOSE_ALPHA_ANHYDRO_MAPPED_SMILES = (
-    "[C@@H:1]1[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
-    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
-)
-
-_CELLULOSE_BETA_ANHYDRO_MAPPED_SMILES = (
-    "[C@H:1]1[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
-    "[C@@H:5]([CH2:6][OH:11])[O:7]1"
-)
-
 _AMYLOSE_ALPHA_NATURAL_MAPPED_SMILES = (
     "[C@@H:1]1([OH:12])[C@H:2]([OH:8])[C@@H:3]([OH:9])[C@H:4]([OH:10])"
     "[C@@H:5]([CH2:6][OH:11])[O:7]1"
@@ -59,28 +49,16 @@ _MAPNUM_TO_LABEL_NATURAL = {
     12: "O1",
 }
 
-_HYDROXYL_MAPNUMS_ANHYDRO = frozenset((8, 9, 10, 11))
 _HYDROXYL_MAPNUMS_NATURAL = frozenset((8, 9, 10, 11, 12))
-
-
-def _hydroxyl_mapnums(
-    representation: MonomerRepresentation,
-) -> frozenset[int]:
-    return (
-        _HYDROXYL_MAPNUMS_ANHYDRO
-        if representation == "anhydro"
-        else _HYDROXYL_MAPNUMS_NATURAL
-    )
 
 
 def _restore_implicit_hydroxyl_hydrogens(
     mol: Chem.Mol,
-    representation: MonomerRepresentation,
 ) -> Chem.Mol:
     """Convert parsed [OH] atoms into implicit-H hydroxyl oxygens."""
     out = Chem.Mol(mol)
     for atom in out.GetAtoms():
-        if atom.GetAtomMapNum() not in _hydroxyl_mapnums(representation):
+        if atom.GetAtomMapNum() not in _HYDROXYL_MAPNUMS_NATURAL:
             continue
         if atom.GetAtomicNum() != 8:
             raise ValueError(
@@ -111,30 +89,32 @@ def _embed_mol_deterministic(mol: Chem.Mol, seed: int) -> Chem.Mol:
     return out
 
 
+def _remove_atom_by_mapnum(mol: Chem.Mol, map_num: int) -> Chem.Mol:
+    matches = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomMapNum() == map_num]
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one atom with map number {map_num}, got {len(matches)}.")
+    rw = Chem.RWMol(mol)
+    rw.RemoveAtom(int(matches[0]))
+    out = rw.GetMol()
+    Chem.SanitizeMol(out)
+    Chem.AssignStereochemistry(out, cleanIt=True, force=True)
+    return out
+
+
 def _make_mol_from_polymer(
     polymer: PolymerKind,
     representation: MonomerRepresentation,
 ) -> Chem.Mol:
-    if representation == "anhydro":
-        if polymer == "amylose":
-            mapped_smiles = _AMYLOSE_ALPHA_ANHYDRO_MAPPED_SMILES
-            seed = 1001
-        elif polymer == "cellulose":
-            mapped_smiles = _CELLULOSE_BETA_ANHYDRO_MAPPED_SMILES
-            seed = 2001
-        else:
-            raise ValueError(f"Unsupported polymer kind: {polymer!r}")
-    elif representation == "natural_oh":
-        if polymer == "amylose":
-            mapped_smiles = _AMYLOSE_ALPHA_NATURAL_MAPPED_SMILES
-            seed = 1101
-        elif polymer == "cellulose":
-            mapped_smiles = _CELLULOSE_BETA_NATURAL_MAPPED_SMILES
-            seed = 2101
-        else:
-            raise ValueError(f"Unsupported polymer kind: {polymer!r}")
-    else:
+    if representation not in {"anhydro", "natural_oh"}:
         raise ValueError(f"Unsupported monomer representation: {representation!r}")
+    if polymer == "amylose":
+        mapped_smiles = _AMYLOSE_ALPHA_NATURAL_MAPPED_SMILES
+        seed = 1101
+    elif polymer == "cellulose":
+        mapped_smiles = _CELLULOSE_BETA_NATURAL_MAPPED_SMILES
+        seed = 2101
+    else:
+        raise ValueError(f"Unsupported polymer kind: {polymer!r}")
 
     mol = Chem.MolFromSmiles(mapped_smiles)
     if mol is None:
@@ -142,8 +122,11 @@ def _make_mol_from_polymer(
             f"Could not parse mapped SMILES for {polymer}/{representation}."
         )
     Chem.SanitizeMol(mol)
-    mol = _restore_implicit_hydroxyl_hydrogens(mol, representation)
-    return _embed_mol_deterministic(mol, seed=seed)
+    mol = _restore_implicit_hydroxyl_hydrogens(mol)
+    mol = _embed_mol_deterministic(mol, seed=seed)
+    if representation == "anhydro":
+        mol = _remove_atom_by_mapnum(mol, 12)
+    return mol
 
 
 def _build_atom_idx(
@@ -183,7 +166,12 @@ def make_glucose_template(
     polymer: PolymerKind,
     monomer_representation: MonomerRepresentation = "anhydro",
 ) -> GlucoseMonomerTemplate:
-    """Return a deterministic monomer graph + label mapping."""
+    """Return the topology-domain heavy-atom glucose template for amylose or cellulose.
+
+    Geometry is always embedded from the complete `natural_oh` monomer first.
+    `anhydro` is then derived by removing `O1` after embedding, so the retained
+    coordinates inherit the chemically complete tetrahedral anomeric geometry.
+    """
     mol = _make_mol_from_polymer(polymer, monomer_representation)
     atom_idx = _build_atom_idx(mol, monomer_representation)
     site_idx = _build_site_idx(atom_idx)

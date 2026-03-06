@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 from rdkit import Chem
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import HelixSpec
 from poly_csp.ordering.scoring import (
     bonded_exclusion_pairs,
@@ -50,7 +51,7 @@ def _build_mol_with_selectors():
     mol = assign_conformer(mol, coords)
     for i in range(dp):
         mol = attach_selector(
-            mol_polymer=mol, template=template,
+            mol_polymer=mol,
             residue_index=i, site="C6", selector=selector,
         )
     return mol

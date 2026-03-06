@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.tmb import make_tmb_template
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
+from poly_csp.structure.selector_library.tmb import make_tmb_template
 from poly_csp.config.schema import HelixSpec
 
 
@@ -53,7 +54,7 @@ def test_tmb_attach_at_c6() -> None:
 
     n_before = mol.GetNumAtoms()
     mol = attach_selector(
-        mol_polymer=mol, template=template,
+        mol_polymer=mol,
         residue_index=0, site="C6", selector=tmb,
         linkage_type="ester",
     )
@@ -73,7 +74,7 @@ def test_tmb_sanitizes() -> None:
 
     for i in range(dp):
         mol = attach_selector(
-            mol_polymer=mol, template=template,
+            mol_polymer=mol,
             residue_index=i, site="C6", selector=tmb,
             linkage_type="ester",
         )

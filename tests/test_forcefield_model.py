@@ -4,11 +4,11 @@ import json
 
 from poly_csp.config.schema import HelixSpec
 from poly_csp.forcefield.model import build_forcefield_molecule
-from poly_csp.structure.all_atom import build_structure_all_atom_molecule
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.structure.backbone_builder import build_backbone_structure
+from poly_csp.topology.backbone import polymerize
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.terminals import apply_terminal_mode
 
 
@@ -25,27 +25,12 @@ def _helix() -> HelixSpec:
     )
 
 
-def _assign_backbone_coords(mol, template, dp: int):
-    from poly_csp.structure.build_helix import build_backbone_coords
-
-    coords = build_backbone_coords(template, _helix(), dp)
-    removed = json.loads(mol.GetProp("_poly_csp_removed_old_indices_json"))
-    if removed:
-        import numpy as np
-
-        keep_mask = np.ones((coords.shape[0],), dtype=bool)
-        keep_mask[np.asarray(removed, dtype=int)] = False
-        coords = coords[keep_mask]
-    return assign_conformer(mol, coords)
-
-
 def test_build_forcefield_molecule_assigns_manifest_names_and_pdb_info() -> None:
     template = make_glucose_template("amylose", monomer_representation="natural_oh")
-    mol = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=1)
+    topology = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
+    mol = build_backbone_structure(topology, _helix()).mol
 
-    structure_result = build_structure_all_atom_molecule(mol, _helix())
-    result = build_forcefield_molecule(structure_result.mol)
+    result = build_forcefield_molecule(mol)
 
     assert len(result.manifest) == result.mol.GetNumAtoms()
     assert result.mol.GetIntProp("_poly_csp_manifest_schema_version") == 1
@@ -59,25 +44,22 @@ def test_build_forcefield_molecule_preserves_selector_connector_and_cap_identity
     template = make_glucose_template("amylose", monomer_representation="natural_oh")
     selector = make_35_dmpc_template()
 
-    mol = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=1)
-    mol = apply_terminal_mode(
-        mol,
+    topology = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
+    topology = apply_terminal_mode(
+        topology,
         mode="capped",
         caps={"left": "acetyl", "right": "methoxy"},
         representation="natural_oh",
     )
+    mol = build_backbone_structure(topology, _helix()).mol
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,
     )
 
-    result = build_forcefield_molecule(
-        build_structure_all_atom_molecule(mol, _helix()).mol
-    )
+    result = build_forcefield_molecule(mol)
     maps = json.loads(result.mol.GetProp("_poly_csp_residue_label_map_json"))
     o1 = result.mol.GetAtomWithIdx(maps[0]["O1"])
 
@@ -98,7 +80,6 @@ def test_build_forcefield_molecule_preserves_selector_connector_and_cap_identity
 def test_build_forcefield_molecule_rejects_implicit_hydrogen_inputs() -> None:
     template = make_glucose_template("amylose")
     mol = polymerize(template=template, dp=1, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=1)
 
     try:
         build_forcefield_molecule(mol)

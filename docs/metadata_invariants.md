@@ -8,11 +8,14 @@ dihedral application, atom mapping, and terminal/export stages.
 - `_poly_csp_dp`:
   Degree of polymerization (residue count in the base backbone before selector addition).
 
+- `_poly_csp_polymer`:
+  Backbone polymer identity (`amylose` or `cellulose`).
+
 - `_poly_csp_representation`:
   Monomer representation mode (`anhydro` or `natural_oh`).
 
 - `_poly_csp_template_atom_count`:
-  Atom count of the monomer template used to generate initial concatenated coordinates.
+  Atom count of the heavy-atom monomer template used by selector-placement helpers and tests.
 
 - `_poly_csp_removed_old_indices_json`:
   JSON list of integer atom indices removed from the initial concatenated template stack.
@@ -111,7 +114,8 @@ dihedral application, atom mapping, and terminal/export stages.
 4. Metadata must be copied forward when creating a new `Chem.Mol` from edited `RWMol` objects.
 5. Component tagging must remain single-valued per atom (`backbone` xor `selector` xor `connector`).
 6. Connector atoms must retain `_poly_csp_selector_instance` and `_poly_csp_selector_local_idx` so they can be remapped from capped-fragment parameters back onto the full polymer.
-7. Hydrogen completion is a derived step: explicit H atoms inherit component/residue/selector metadata from their parent heavy atom and record `_poly_csp_parent_heavy_idx`.
-8. The structure-domain all-atom handoff preserves heavy-atom indices from the heavy master; explicit hydrogens are appended after the heavy atoms.
-9. Backbone hydrogens in the all-atom handoff come from explicit-H residue templates, not from late whole-molecule generic hydrogen addition.
-10. PDB naming should prefer `_poly_csp_atom_name` / preassigned residue info when present instead of regenerating names heuristically.
+7. Explicit H atoms inherit component/residue/selector metadata from their parent heavy atom and record `_poly_csp_parent_heavy_idx`.
+8. Component geometry must be derived from the complete chemically valid structure first, then pruned by removing designated atoms or hydrogens. This rule applies to glucose representation variants (`natural_oh` -> `anhydro`) and to residue-state template variants.
+9. Within `build_backbone_structure()`, heavy backbone atoms are added before their hydrogens so residue label maps remain stable when later attachment hydrogens are consumed.
+10. Backbone hydrogens come from explicit-H residue templates placed directly into the helix, not from a late whole-molecule generic hydrogen-addition step.
+11. PDB naming should prefer `_poly_csp_atom_name` / preassigned residue info when present instead of regenerating names heuristically.

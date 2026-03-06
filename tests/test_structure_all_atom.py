@@ -3,16 +3,20 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from poly_csp.config.schema import HelixSpec
-from poly_csp.structure.all_atom import (
-    build_structure_all_atom_molecule,
-    select_residue_templates,
+from poly_csp.structure.backbone_builder import (
+    _linkage_targets,
+    build_backbone_structure,
+    inspect_backbone_linkages,
 )
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from tests.support import build_backbone_coords
+from poly_csp.topology.backbone import polymerize
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.residue_state import resolve_residue_template_states
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.terminals import apply_terminal_mode
 
 
@@ -29,33 +33,30 @@ def _helix() -> HelixSpec:
     )
 
 
-def _assign_backbone_coords(mol, template, dp: int):
-    from poly_csp.structure.build_helix import build_backbone_coords
-
+def _expected_heavy_coords(template, topology_mol, dp: int) -> np.ndarray:
     coords = build_backbone_coords(template, _helix(), dp)
-    removed = json.loads(mol.GetProp("_poly_csp_removed_old_indices_json"))
+    removed = json.loads(topology_mol.GetProp("_poly_csp_removed_old_indices_json"))
     if removed:
         keep_mask = np.ones((coords.shape[0],), dtype=bool)
         keep_mask[np.asarray(removed, dtype=int)] = False
         coords = coords[keep_mask]
-    return assign_conformer(mol, coords)
+    return coords
 
 
 def test_select_residue_templates_detects_substitution_and_termini() -> None:
     template = make_glucose_template("amylose", monomer_representation="natural_oh")
     selector = make_35_dmpc_template()
 
-    mol = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=2)
+    topology = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
+    mol = build_backbone_structure(topology, _helix()).mol
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,
     )
 
-    states = select_residue_templates(mol)
+    states = resolve_residue_template_states(mol)
     assert len(states) == 2
     assert states[0].substituted_sites == ("C6",)
     assert states[0].incoming_link is False
@@ -73,7 +74,7 @@ def test_select_residue_templates_tracks_periodic_and_capped_anchor_states() -> 
         caps={},
         representation="natural_oh",
     )
-    periodic_states = select_residue_templates(periodic)
+    periodic_states = resolve_residue_template_states(periodic)
     assert periodic_states[0].has_o1 is False
     assert all(state.incoming_link for state in periodic_states)
     assert all(state.outgoing_link for state in periodic_states)
@@ -86,42 +87,122 @@ def test_select_residue_templates_tracks_periodic_and_capped_anchor_states() -> 
         caps={"left": "acetyl", "right": "methoxy"},
         representation="anhydro",
     )
-    capped_states = select_residue_templates(capped)
+    capped_states = resolve_residue_template_states(capped)
     assert capped_states[0].left_cap == "acetyl"
     assert capped_states[0].left_anchor_label == "C1"
     assert capped_states[-1].right_cap == "methoxy"
     assert capped_states[-1].right_anchor_label == "O4"
 
 
-def test_build_structure_all_atom_molecule_preserves_heavy_coords_and_backbone_hydrogens() -> None:
+def test_build_backbone_structure_places_explicit_h_backbone_directly() -> None:
     template = make_glucose_template("amylose", monomer_representation="natural_oh")
-    selector = make_35_dmpc_template()
+    topology = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
 
-    mol = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=2)
-    mol = attach_selector(
-        mol_polymer=mol,
-        template=template,
-        residue_index=0,
-        site="C6",
-        selector=selector,
-    )
-    heavy_xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float)
-
-    out = build_structure_all_atom_molecule(mol, _helix()).mol
-    all_xyz = np.asarray(out.GetConformer(0).GetPositions(), dtype=float)
-    assert np.allclose(all_xyz[: mol.GetNumAtoms()], heavy_xyz, atol=1e-6)
-
+    out = build_backbone_structure(topology, _helix()).mol
     maps = json.loads(out.GetProp("_poly_csp_residue_label_map_json"))
-    res0_o6 = out.GetAtomWithIdx(maps[0]["O6"])
+    all_xyz = np.asarray(out.GetConformer(0).GetPositions(), dtype=float)
+    expected_heavy = _expected_heavy_coords(template, topology, dp=2)
+    heavy_indices = sorted(
+        atom_idx
+        for mapping in maps
+        for atom_idx in mapping.values()
+    )
+
+    assert np.allclose(all_xyz[heavy_indices], expected_heavy, atol=1e-6)
+
     res0_o4 = out.GetAtomWithIdx(maps[0]["O4"])
     res1_o4 = out.GetAtomWithIdx(maps[1]["O4"])
     res0_c6 = out.GetAtomWithIdx(maps[0]["C6"])
 
-    assert sum(1 for nbr in res0_o6.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
     assert sum(1 for nbr in res0_o4.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
     assert sum(1 for nbr in res1_o4.GetNeighbors() if nbr.GetAtomicNum() == 1) == 1
     assert sum(1 for nbr in res0_c6.GetNeighbors() if nbr.GetAtomicNum() == 1) == 2
+
+
+def test_build_backbone_structure_preserves_glycosidic_linkage_geometry() -> None:
+    topology = polymerize(
+        template=make_glucose_template("amylose"),
+        dp=4,
+        linkage="1-4",
+        anomer="alpha",
+    )
+    out = build_backbone_structure(topology, _helix()).mol
+    targets = _linkage_targets(polymer="amylose", representation="anhydro")
+    metrics = inspect_backbone_linkages(out)
+
+    assert len(metrics) == 3
+    for metric in metrics:
+        assert abs(metric.bond_length_A - targets.bond_length_A) < 0.12
+        assert abs(metric.donor_angle_deg - targets.donor_angle_deg) < 10.0
+        assert abs(metric.acceptor_angle_deg - targets.acceptor_angle_deg) < 10.0
+        assert abs(metric.acceptor_angle_c2_deg - targets.acceptor_angle_c2_deg) < 10.0
+
+
+def test_build_backbone_structure_keeps_incoming_o4_out_of_h1_slot() -> None:
+    topology = polymerize(
+        template=make_glucose_template("amylose"),
+        dp=3,
+        linkage="1-4",
+        anomer="alpha",
+    )
+    out = build_backbone_structure(topology, _helix()).mol
+    metrics = inspect_backbone_linkages(out)
+
+    assert len(metrics) == 2
+    assert all(metric.o4_h1_distance_A is not None for metric in metrics)
+    assert all(metric.o4_h1_distance_A > 1.4 for metric in metrics if metric.o4_h1_distance_A is not None)
+
+
+def test_build_backbone_structure_rejects_incompatible_helix_request() -> None:
+    topology = polymerize(
+        template=make_glucose_template("amylose"),
+        dp=3,
+        linkage="1-4",
+        anomer="alpha",
+    )
+    bad_helix = HelixSpec(
+        name="chemically_bad",
+        theta_rad=0.5,
+        rise_A=12.0,
+        repeat_residues=1,
+        repeat_turns=1,
+        residues_per_turn=1.0,
+        pitch_A=12.0,
+        handedness="left",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="chemically plausible glycosidic bond",
+    ):
+        build_backbone_structure(topology, bad_helix)
+
+
+def test_selector_attachment_uses_explicit_h_backbone_and_selector_templates() -> None:
+    template = make_glucose_template("amylose", monomer_representation="natural_oh")
+    selector = make_35_dmpc_template()
+
+    topology = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
+    mol = build_backbone_structure(topology, _helix()).mol
+    maps = json.loads(mol.GetProp("_poly_csp_residue_label_map_json"))
+    expected_heavy = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float)
+
+    out = attach_selector(
+        mol_polymer=mol,
+        residue_index=0,
+        site="C6",
+        selector=selector,
+    )
+    all_xyz = np.asarray(out.GetConformer(0).GetPositions(), dtype=float)
+    heavy_indices = sorted(
+        atom_idx
+        for mapping in maps
+        for atom_idx in mapping.values()
+    )
+    assert np.allclose(all_xyz[heavy_indices], expected_heavy[heavy_indices], atol=1e-6)
+
+    res0_o6 = out.GetAtomWithIdx(maps[0]["O6"])
+    assert sum(1 for nbr in res0_o6.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
 
     amide_n = next(
         atom
@@ -134,31 +215,32 @@ def test_build_structure_all_atom_molecule_preserves_heavy_coords_and_backbone_h
     assert amide_h[0].GetProp("_poly_csp_component") == "connector"
 
 
-def test_build_structure_all_atom_molecule_handles_capped_termini() -> None:
+def test_build_backbone_structure_handles_capped_termini() -> None:
     template = make_glucose_template("amylose")
-    mol = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
-    mol = _assign_backbone_coords(mol, template, dp=2)
-    mol = apply_terminal_mode(
-        mol,
+    topology = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
+    topology = apply_terminal_mode(
+        topology,
         mode="capped",
         caps={"left": "acetyl", "right": "methoxy"},
         representation="anhydro",
     )
 
-    out = build_structure_all_atom_molecule(mol, _helix()).mol
+    out = build_backbone_structure(topology, _helix()).mol
     maps = json.loads(out.GetProp("_poly_csp_residue_label_map_json"))
     c1 = out.GetAtomWithIdx(maps[0]["C1"])
     o4 = out.GetAtomWithIdx(maps[-1]["O4"])
 
     assert sum(1 for nbr in c1.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
     assert sum(1 for nbr in o4.GetNeighbors() if nbr.GetAtomicNum() == 1) == 0
+    assert json.loads(out.GetProp("_poly_csp_terminal_cap_indices_json"))["left"]
+    assert json.loads(out.GetProp("_poly_csp_terminal_cap_indices_json"))["right"]
 
 
-def test_build_structure_all_atom_molecule_rebuilds_backbone_without_conformer() -> None:
+def test_build_backbone_structure_assigns_coordinates_without_input_conformer() -> None:
     template = make_glucose_template("amylose", monomer_representation="natural_oh")
-    mol = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
-    mol.RemoveAllConformers()
+    topology = polymerize(template=template, dp=2, linkage="1-4", anomer="alpha")
+    topology.RemoveAllConformers()
 
-    out = build_structure_all_atom_molecule(mol, _helix()).mol
+    out = build_backbone_structure(topology, _helix()).mol
     assert out.GetNumConformers() == 1
-    assert out.GetNumAtoms() > mol.GetNumAtoms()
+    assert out.GetNumAtoms() > topology.GetNumAtoms()

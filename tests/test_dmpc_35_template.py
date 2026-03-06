@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rdkit import Chem
 
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 
 
 def test_make_35_dmpc_template_structure() -> None:

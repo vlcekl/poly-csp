@@ -4,11 +4,12 @@ import json
 
 import numpy as np
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.reactions import attach_selector, residue_atom_global_index
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import HelixSpec
 
 
@@ -38,7 +39,6 @@ def test_attach_selector_c6_adds_expected_atoms_and_bond() -> None:
     added_expected = selector.mol.GetNumAtoms() - 1  # dummy removed on attach
     mol2 = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,
@@ -68,7 +68,6 @@ def test_attach_selector_all_residues_c6_sanitizes() -> None:
     for i in range(dp):
         mol = attach_selector(
             mol_polymer=mol,
-            template=template,
             residue_index=i,
             site="C6",
             selector=selector,
@@ -91,7 +90,6 @@ def test_attach_selector_all_sites_all_residues_increases_atom_count() -> None:
         for site in ("C2", "C3", "C6"):
             mol = attach_selector(
                 mol_polymer=mol,
-                template=template,
                 residue_index=i,
                 site=site,
                 selector=selector,
@@ -125,7 +123,6 @@ def test_attach_selector_consumes_site_oh_and_preserves_carbamate_nh() -> None:
 
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,

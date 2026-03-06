@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.config.schema import HelixSpec
 from poly_csp.structure.matrix import ScrewTransform

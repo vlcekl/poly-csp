@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from poly_csp.config.schema import HelixSpec
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.atom_mapping import (
     attachment_instance_maps,
     backbone_indices,
@@ -11,10 +11,11 @@ from poly_csp.topology.atom_mapping import (
     selector_indices,
     selector_instance_maps,
 )
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 
 
 def _helix() -> HelixSpec:
@@ -38,7 +39,6 @@ def test_atom_mapping_sets_are_disjoint_and_exhaustive() -> None:
     mol = assign_conformer(mol, build_backbone_coords(template, _helix(), dp=4))
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=1,
         site="C6",
         selector=selector,
@@ -55,7 +55,7 @@ def test_atom_mapping_sets_are_disjoint_and_exhaustive() -> None:
     assert sel.isdisjoint(conn)
     assert len(bb | sel | conn) == mol.GetNumAtoms()
     assert len(sel) > 0
-    assert len(conn) == len(selector.connector_local_roles)
+    assert len(conn) == len(selector.connector_local_roles) + 1
 
 
 def test_selector_instance_maps_present_after_attachment() -> None:
@@ -66,7 +66,6 @@ def test_selector_instance_maps_present_after_attachment() -> None:
     mol = assign_conformer(mol, build_backbone_coords(template, _helix(), dp=2))
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,
@@ -86,7 +85,6 @@ def test_attachment_instance_maps_include_selector_and_connector_atoms() -> None
     mol = assign_conformer(mol, build_backbone_coords(template, _helix(), dp=2))
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site="C6",
         selector=selector,
@@ -102,4 +100,5 @@ def test_attachment_instance_maps_include_selector_and_connector_atoms() -> None
     assert len(selector_only[instance_id]) + len(connector_only[instance_id]) == len(
         attached[instance_id]
     )
-    assert set(connector_only[instance_id]) == set(selector.connector_local_roles)
+    assert set(selector.connector_local_roles).issubset(set(connector_only[instance_id]))
+    assert len(connector_only[instance_id]) == len(selector.connector_local_roles) + 1

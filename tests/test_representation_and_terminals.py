@@ -4,11 +4,11 @@ import json
 
 import numpy as np
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.structure.backbone_builder import build_backbone_structure
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.backbone import polymerize
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.terminals import apply_terminal_mode
 from poly_csp.config.schema import HelixSpec
 
@@ -48,16 +48,11 @@ def test_natural_oh_coords_pruning_and_selector_attachment() -> None:
     selector = make_35_dmpc_template()
     dp = 3
 
-    coords = build_backbone_coords(template, _helix(), dp)
-    mol = polymerize(template=template, dp=dp, linkage="1-4", anomer="alpha")
-    removed = json.loads(mol.GetProp("_poly_csp_removed_old_indices_json"))
-    keep_mask = np.ones((coords.shape[0],), dtype=bool)
-    keep_mask[np.asarray(removed, dtype=int)] = False
-    mol = assign_conformer(mol, coords[keep_mask])
+    topology = polymerize(template=template, dp=dp, linkage="1-4", anomer="alpha")
+    mol = build_backbone_structure(topology, _helix()).mol
 
     mol2 = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=1,
         site="C6",
         selector=selector,
@@ -80,7 +75,7 @@ def test_apply_terminal_mode_sets_policy_metadata() -> None:
     )
 
     assert open_mol.GetNumAtoms() == n
-    assert capped_mol.GetNumAtoms() == n + 4
+    assert capped_mol.GetNumAtoms() == n
     assert periodic_mol.GetNumAtoms() == n
 
     assert open_mol.GetProp("_poly_csp_end_mode") == "open"
@@ -90,6 +85,12 @@ def test_apply_terminal_mode_sets_policy_metadata() -> None:
     assert open_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
     assert capped_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
     assert periodic_mol.GetBoolProp("_poly_csp_terminal_topology_pending") is False
+    assert json.loads(capped_mol.GetProp("_poly_csp_terminal_meta_json")) == {
+        "left_anchor_label": "C1",
+        "left_anchor_idx": 0,
+        "right_anchor_label": "O4",
+        "right_anchor_idx": json.loads(capped_mol.GetProp("_poly_csp_residue_label_map_json"))[-1]["O4"],
+    }
 
 
 def test_periodic_mode_closes_terminal_bond() -> None:

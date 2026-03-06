@@ -26,10 +26,9 @@ from rdkit import Chem
 from omegaconf import DictConfig, OmegaConf
 
 from poly_csp.forcefield.model import build_forcefield_molecule
-from poly_csp.structure.all_atom import build_structure_all_atom_molecule
-from poly_csp.structure.build_helix import build_backbone_coords
+from poly_csp.structure.backbone_builder import build_backbone_structure
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.backbone import polymerize
 from poly_csp.topology.terminals import apply_terminal_mode
 from poly_csp.config.schema import (
     BackboneSpec,
@@ -129,8 +128,6 @@ class BuildReport:
     amber_enabled: bool
     amber_summary: dict[str, object]
     output_export_formats: List[str]
-    final_structure_variant: str
-    heavy_debug_written: bool
     all_atom_atom_count: Optional[int] = None
     all_atom_backbone_h_count: Optional[int] = None
     all_atom_manifest_schema_version: Optional[int] = None
@@ -295,76 +292,6 @@ def _finite_or_none(value: float) -> Optional[float]:
     return float(value) if np.isfinite(value) else None
 
 
-def _finalize_output_molecule(
-    mol: Chem.Mol,
-    *,
-    helix: HelixSpec,
-    final_structure_variant: str,
-) -> tuple[Chem.Mol, dict[str, Optional[int]]]:
-    if final_structure_variant != "all_atom":
-        return Chem.Mol(mol), {
-            "all_atom_atom_count": None,
-            "all_atom_backbone_h_count": None,
-            "all_atom_manifest_schema_version": None,
-        }
-
-    structure_result = build_structure_all_atom_molecule(mol, helix_spec=helix)
-    forcefield_result = build_forcefield_molecule(structure_result.mol)
-    manifest = forcefield_result.manifest
-    stats = {
-        "all_atom_atom_count": int(forcefield_result.mol.GetNumAtoms()),
-        "all_atom_backbone_h_count": sum(
-            1
-            for entry in manifest
-            if entry.component == "backbone" and entry.atom_index != entry.parent_heavy_index
-        ),
-        "all_atom_manifest_schema_version": (
-            int(forcefield_result.mol.GetIntProp("_poly_csp_manifest_schema_version"))
-            if forcefield_result.mol.HasProp("_poly_csp_manifest_schema_version")
-            else None
-        ),
-    }
-    return forcefield_result.mol, stats
-
-
-def _hydrogen_handling_cfg(cfg: DictConfig) -> dict[str, object]:
-    relax_cfg = (
-        cfg.forcefield.options
-        if "forcefield" in cfg
-        and cfg.forcefield is not None
-        and "options" in cfg.forcefield
-        and cfg.forcefield.options is not None
-        else {}
-    )
-    payload = (
-        relax_cfg.hydrogen_handling
-        if hasattr(relax_cfg, "hydrogen_handling")
-        and relax_cfg.hydrogen_handling is not None
-        else {}
-    )
-    return {
-        "master_mode": str(payload.master_mode) if "master_mode" in payload else "implicit",
-        "parameterize_explicit_hydrogens": bool(
-            payload.parameterize_explicit_hydrogens
-            if "parameterize_explicit_hydrogens" in payload
-            else True
-        ),
-        "final_structure_mode": str(
-            payload.final_structure_mode if "final_structure_mode" in payload else "all_atom"
-        ),
-        "optimize_added_hydrogens": bool(
-            payload.optimize_added_hydrogens
-            if "optimize_added_hydrogens" in payload
-            else True
-        ),
-        "strict_exchangeable_site_validation": bool(
-            payload.strict_exchangeable_site_validation
-            if "strict_exchangeable_site_validation" in payload
-            else True
-        ),
-    }
-
-
 @hydra.main(config_path="../../../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     print("=== poly_csp build_csp ===")
@@ -391,17 +318,6 @@ def main(cfg: DictConfig) -> None:
         [str(x).strip().lower() for x in cfg.output.export_formats]
         if "output" in cfg and "export_formats" in cfg.output
         else ["pdb"]
-    )
-    hydrogen_handling = _hydrogen_handling_cfg(cfg)
-    final_structure_variant = (
-        str(cfg.output.final_structure_variant)
-        if "output" in cfg and "final_structure_variant" in cfg.output
-        else str(hydrogen_handling["final_structure_mode"])
-    ).strip().lower()
-    write_heavy_debug = bool(
-        "output" in cfg
-        and "write_heavy_debug" in cfg.output
-        and cfg.output.write_heavy_debug
     )
     amber_cfg_enabled = bool(
         "amber" in cfg and cfg.amber is not None and "enabled" in cfg.amber and cfg.amber.enabled
@@ -464,36 +380,24 @@ def main(cfg: DictConfig) -> None:
         cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs"
     )
 
-    # ---- Stage 1/2: backbone template + helical coords + polymerize.
+    # ---- Stage 1/2: topology state -> direct explicit-H backbone build.
     template = make_glucose_template(
         backbone.polymer,
         monomer_representation=backbone.monomer_representation,
     )
-    coords = build_backbone_coords(template=template, helix=backbone.helix, dp=backbone.dp)
-
-    mol_poly = polymerize(
+    topology_mol = polymerize(
         template=template,
         dp=backbone.dp,
         linkage="1-4",
         anomer="alpha" if backbone.polymer == "amylose" else "beta",
     )
-    removed_old = (
-        json.loads(mol_poly.GetProp("_poly_csp_removed_old_indices_json"))
-        if mol_poly.HasProp("_poly_csp_removed_old_indices_json")
-        else []
-    )
-    coords_for_mol = coords
-    if removed_old:
-        keep_mask = np.ones((coords.shape[0],), dtype=bool)
-        keep_mask[np.asarray(removed_old, dtype=int)] = False
-        coords_for_mol = coords[keep_mask]
-    mol_poly = assign_conformer(mol_poly, coords_for_mol)
-    mol_poly = apply_terminal_mode(
-        mol=mol_poly,
+    topology_mol = apply_terminal_mode(
+        mol=topology_mol,
         mode=backbone.end_mode,
         caps=backbone.end_caps,
         representation=backbone.monomer_representation,
     )
+    mol_poly = build_backbone_structure(topology_mol, helix_spec=helix).mol
 
     # ---- Stage 2b: compute and store PBC box vectors for periodic mode.
     is_periodic = str(backbone.end_mode) == "periodic"
@@ -537,7 +441,6 @@ def main(cfg: DictConfig) -> None:
             for site in selector_sites:
                 mol_poly = attach_selector(
                     mol_polymer=mol_poly,
-                    template=template,
                     residue_index=res_i,
                     site=site,  # type: ignore[arg-type]
                     selector=selector,
@@ -764,13 +667,21 @@ def main(cfg: DictConfig) -> None:
         )
         amber_export_done = True
 
-    final_mol, all_atom_stats = _finalize_output_molecule(
-        mol_poly,
-        helix=helix,
-        final_structure_variant=final_structure_variant,
-    )
-    heavy_debug_written = bool(write_heavy_debug and final_structure_variant == "all_atom")
-
+    forcefield_result = build_forcefield_molecule(mol_poly)
+    final_mol = forcefield_result.mol
+    all_atom_stats = {
+        "all_atom_atom_count": int(final_mol.GetNumAtoms()),
+        "all_atom_backbone_h_count": sum(
+            1
+            for entry in forcefield_result.manifest
+            if entry.component == "backbone" and entry.atom_index != entry.parent_heavy_index
+        ),
+        "all_atom_manifest_schema_version": (
+            int(final_mol.GetIntProp("_poly_csp_manifest_schema_version"))
+            if final_mol.HasProp("_poly_csp_manifest_schema_version")
+            else None
+        ),
+    }
     report = BuildReport(
         polymer=str(backbone.polymer),
         dp=int(backbone.dp),
@@ -806,8 +717,6 @@ def main(cfg: DictConfig) -> None:
         amber_enabled=bool(amber_enabled),
         amber_summary=amber_summary,
         output_export_formats=output_export_formats,
-        final_structure_variant=final_structure_variant,
-        heavy_debug_written=heavy_debug_written,
         all_atom_atom_count=all_atom_stats["all_atom_atom_count"],
         all_atom_backbone_h_count=all_atom_stats["all_atom_backbone_h_count"],
         all_atom_manifest_schema_version=all_atom_stats["all_atom_manifest_schema_version"],
@@ -829,13 +738,6 @@ def main(cfg: DictConfig) -> None:
     if "sdf" in output_export_formats:
         write_sdf(final_mol, sdf_path)
 
-    heavy_pdb_path = outdir / "model_heavy.pdb"
-    heavy_sdf_path = outdir / "model_heavy.sdf"
-    if heavy_debug_written and "pdb" in output_export_formats:
-        write_pdb_from_rdkit(mol_poly, heavy_pdb_path)
-    if heavy_debug_written and "sdf" in output_export_formats:
-        write_sdf(mol_poly, heavy_sdf_path)
-
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(asdict(report), handle, indent=2)
 
@@ -847,10 +749,6 @@ def main(cfg: DictConfig) -> None:
         wrote_lines.append(f"  {pdb_path}")
     if "sdf" in output_export_formats:
         wrote_lines.append(f"  {sdf_path}")
-    if heavy_debug_written and "pdb" in output_export_formats:
-        wrote_lines.append(f"  {heavy_pdb_path}")
-    if heavy_debug_written and "sdf" in output_export_formats:
-        wrote_lines.append(f"  {heavy_sdf_path}")
     wrote_lines.extend([f"  {json_path}", f"  {cfg_path}"])
     print("\nWrote:\n" + "\n".join(wrote_lines))
     if amber_enabled and "files" in amber_summary:
@@ -874,19 +772,11 @@ def main(cfg: DictConfig) -> None:
         ranking_entries = []
         for result in ranked_results:
             rank_dir = _ensure_outdir(outdir / f"ranked_{result.rank:03d}")
-            rank_final_mol, _ = _finalize_output_molecule(
-                result.mol,
-                helix=helix,
-                final_structure_variant=final_structure_variant,
-            )
+            rank_final_mol = build_forcefield_molecule(result.mol).mol
             if "pdb" in output_export_formats:
                 write_pdb_from_rdkit(rank_final_mol, rank_dir / "model.pdb")
             if "sdf" in output_export_formats:
                 write_sdf(rank_final_mol, rank_dir / "model.sdf")
-            if heavy_debug_written and "pdb" in output_export_formats:
-                write_pdb_from_rdkit(result.mol, rank_dir / "model_heavy.pdb")
-            if heavy_debug_written and "sdf" in output_export_formats:
-                write_sdf(result.mol, rank_dir / "model_heavy.sdf")
             rank_report = {
                 "rank": result.rank,
                 "score": result.score,

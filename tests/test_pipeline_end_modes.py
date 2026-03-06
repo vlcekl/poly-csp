@@ -23,15 +23,6 @@ def _run_build(overrides: str) -> None:
     )
 
 
-def _count_pdb_atoms(path: Path) -> int:
-    text = path.read_text(encoding="utf-8")
-    return sum(
-        1
-        for line in text.splitlines()
-        if line.startswith(("ATOM", "HETATM"))
-    )
-
-
 def test_pipeline_capped_mode_runs_with_explicit_caps(tmp_path: Path) -> None:
     outdir = tmp_path / "capped_out"
     _run_build(
@@ -66,26 +57,19 @@ def test_pipeline_periodic_natural_oh_runs(tmp_path: Path) -> None:
     assert (outdir / "model.pdb").exists()
 
 
-def test_pipeline_writes_all_atom_model_by_default_and_optional_heavy_debug(
-    tmp_path: Path,
-) -> None:
+def test_pipeline_writes_all_atom_model_by_default(tmp_path: Path) -> None:
     outdir = tmp_path / "all_atom_out"
     _run_build(
         "topology.backbone.dp=1 topology.selector.enabled=false "
         "forcefield.options.enabled=false amber.enabled=false "
-        "output.write_heavy_debug=true "
         f"output.dir={outdir}"
     )
 
     report = json.loads((outdir / "build_report.json").read_text(encoding="utf-8"))
-    assert report["final_structure_variant"] == "all_atom"
-    assert report["heavy_debug_written"] is True
     assert report["all_atom_atom_count"] is not None
     assert report["all_atom_backbone_h_count"] is not None
     assert report["all_atom_manifest_schema_version"] == 1
 
     model_pdb = outdir / "model.pdb"
-    heavy_pdb = outdir / "model_heavy.pdb"
     assert model_pdb.exists()
-    assert heavy_pdb.exists()
-    assert _count_pdb_atoms(model_pdb) > _count_pdb_atoms(heavy_pdb)
+    assert not (outdir / "model_heavy.pdb").exists()

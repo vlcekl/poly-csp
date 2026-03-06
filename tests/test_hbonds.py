@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.config.schema import HelixSpec
 from poly_csp.ordering.hbonds import compute_hbond_metrics
 
@@ -35,7 +36,6 @@ def test_compute_hbond_metrics_runs_on_selector_decorated_polymer() -> None:
     for i in range(dp):
         mol = attach_selector(
             mol_polymer=mol,
-            template=template,
             residue_index=i,
             site="C6",
             selector=selector,

@@ -88,7 +88,7 @@ class SelectorRegistry:
     def _register_builtins(cls) -> None:
         tpl = cls._reg.get("35dmpc")
         if tpl is None:
-            from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+            from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 
             tpl = make_35_dmpc_template()
             cls.register(tpl)

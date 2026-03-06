@@ -5,11 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from poly_csp.structure.build_helix import build_backbone_coords
+from tests.support import build_backbone_coords
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import assign_conformer, polymerize
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.topology.backbone import polymerize
+from tests.support import assign_conformer
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.linkage import CARBAMATE, build_linkage_coords
 from poly_csp.config.schema import HelixSpec
 
@@ -35,7 +36,6 @@ def _build_mol_with_selector(dp: int = 2, site: str = "C6"):
     mol = assign_conformer(mol, coords)
     mol = attach_selector(
         mol_polymer=mol,
-        template=template,
         residue_index=0,
         site=site,
         selector=selector,
@@ -142,7 +142,6 @@ def test_attach_all_sites_preserves_atom_count() -> None:
         for site in ("C2", "C3", "C6"):
             mol = attach_selector(
                 mol_polymer=mol,
-                template=template,
                 residue_index=i,
                 site=site,
                 selector=selector,

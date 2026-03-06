@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
 from rdkit import Chem
 
 from poly_csp.topology.monomers import make_glucose_template
@@ -51,6 +53,27 @@ def test_make_glucose_template_anhydro_free_hydroxyls_keep_total_hydrogens() -> 
     for label in ("O2", "O3", "O4", "O6"):
         atom = template.mol.GetAtomWithIdx(template.atom_idx[label])
         assert atom.GetTotalNumHs(includeNeighbors=True) == 1
+
+
+@pytest.mark.parametrize("polymer", ["amylose", "cellulose"])
+def test_anhydro_template_reuses_natural_oh_geometry_except_o1(polymer: str) -> None:
+    natural = make_glucose_template(polymer, monomer_representation="natural_oh")
+    anhydro = make_glucose_template(polymer, monomer_representation="anhydro")
+
+    natural_xyz = np.asarray(natural.mol.GetConformer(0).GetPositions(), dtype=float)
+    anhydro_xyz = np.asarray(anhydro.mol.GetConformer(0).GetPositions(), dtype=float)
+
+    assert "O1" in natural.atom_idx
+    assert "O1" not in anhydro.atom_idx
+
+    for label, anhydro_idx in anhydro.atom_idx.items():
+        assert label in natural.atom_idx
+        natural_idx = natural.atom_idx[label]
+        assert np.allclose(
+            anhydro_xyz[anhydro_idx],
+            natural_xyz[natural_idx],
+            atol=1e-6,
+        )
 
 
 def test_amylose_template_has_defined_ring_stereo() -> None:

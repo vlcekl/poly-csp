@@ -41,6 +41,7 @@ def test_pipeline_topology_backbone_group_override_runs(tmp_path: Path) -> None:
 def test_pipeline_structure_helix_group_override_runs(tmp_path: Path) -> None:
     outdir = tmp_path / "cellulose_helix_out"
     _run_build(
+        "topology/backbone=cellulose "
         "structure/helix=cellulose_i "
         "topology.backbone.dp=2 "
         "topology.selector.enabled=false "
@@ -49,5 +50,6 @@ def test_pipeline_structure_helix_group_override_runs(tmp_path: Path) -> None:
     )
 
     report = json.loads((outdir / "build_report.json").read_text(encoding="utf-8"))
+    assert report["polymer"] == "cellulose"
     assert report["helix_name"] == "cellulose_I_2_1"
     assert report["qc_pass"] is True

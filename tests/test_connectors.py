@@ -11,8 +11,8 @@ from poly_csp.forcefield.connectors import (
     extract_linkage_params_from_system,
     parameterize_capped_monomer,
 )
-from poly_csp.topology.selector_library.dmpc_35 import make_35_dmpc_template
-from poly_csp.topology.selector_library.tmb import make_tmb_template
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
+from poly_csp.structure.selector_library.tmb import make_tmb_template
 from poly_csp.topology.selectors import SelectorTemplate
 
 
@@ -118,7 +118,19 @@ def test_build_capped_monomer_fragment_assigns_backbone_and_selector_roles() -> 
     assert "BB_C6" in frag.atom_roles
     assert any(role.startswith("SL_") for role in frag.atom_roles)
     assert set(frag.connector_roles) == {"carbonyl_c", "carbonyl_o", "amide_n"}
-    assert len(frag.atom_roles) == frag.mol.GetNumAtoms()
+    role_indices = set(frag.atom_roles.values())
+    backbone_heavy = {
+        atom.GetIdx()
+        for atom in frag.mol.GetAtoms()
+        if atom.GetAtomicNum() > 1 and not atom.HasProp("_poly_csp_selector_instance")
+    }
+    selector_atoms = {
+        atom.GetIdx()
+        for atom in frag.mol.GetAtoms()
+        if atom.HasProp("_poly_csp_selector_instance")
+    }
+    assert backbone_heavy.issubset(role_indices)
+    assert selector_atoms.issubset(role_indices)
 
 
 def test_build_capped_monomer_fragment_handles_ester_selector() -> None:

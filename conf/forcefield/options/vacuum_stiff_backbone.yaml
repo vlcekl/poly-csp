@@ -15,10 +15,3 @@ anneal:
   t_end_K: 350
   n_steps: 50000
   cool_down: true
-
-hydrogen_handling:
-  master_mode: implicit
-  parameterize_explicit_hydrogens: true
-  final_structure_mode: all_atom
-  optimize_added_hydrogens: true
-  strict_exchangeable_site_validation: true

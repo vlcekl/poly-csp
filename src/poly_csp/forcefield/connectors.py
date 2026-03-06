@@ -10,10 +10,11 @@ from openmm import app as mmapp
 from openmm import unit
 from rdkit import Chem
 
-from poly_csp.config.schema import MonomerRepresentation, PolymerKind, Site
+from poly_csp.config.schema import HelixSpec, MonomerRepresentation, PolymerKind, Site
 from poly_csp.forcefield.gaff import build_fragment_prmtop, parameterize_gaff_fragment
+from poly_csp.structure.backbone_builder import build_backbone_structure
 from poly_csp.topology.atom_mapping import attachment_instance_maps
-from poly_csp.topology.backbone import assign_conformer, polymerize
+from poly_csp.topology.backbone import polymerize
 from poly_csp.topology.monomers import make_glucose_template
 from poly_csp.topology.reactions import attach_selector
 from poly_csp.topology.selectors import SelectorTemplate
@@ -78,19 +79,27 @@ def build_capped_monomer_fragment(
         polymer,
         monomer_representation=monomer_representation,
     )
-    frag = polymerize(
+    topology = polymerize(
         template=template,
         dp=1,
         linkage="1-4",
         anomer="alpha" if polymer == "amylose" else "beta",
     )
-    coords = np.asarray(
-        template.mol.GetConformer(0).GetPositions(), dtype=float
-    ).reshape((-1, 3))
-    frag = assign_conformer(frag, coords)
+    frag = build_backbone_structure(
+        topology,
+        helix_spec=HelixSpec(
+            name="fragment",
+            theta_rad=0.0,
+            rise_A=0.0,
+            repeat_residues=1,
+            repeat_turns=1,
+            residues_per_turn=1.0,
+            pitch_A=1.0,
+            handedness="right",
+        ),
+    ).mol
     frag = attach_selector(
         mol_polymer=frag,
-        template=template,
         residue_index=0,
         site=site,
         selector=selector_template,

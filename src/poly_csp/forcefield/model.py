@@ -53,6 +53,7 @@ def _validate_backbone_metadata(mol: Chem.Mol) -> None:
 def build_forcefield_molecule(
     mol_structure_all_atom: Chem.Mol,
 ) -> ForcefieldModelResult:
+    """Validate and normalize the structure-domain all-atom molecule for forcefield use."""
     coords_before = coords_from_mol(mol_structure_all_atom)
     mol = Chem.Mol(mol_structure_all_atom)
     _validate_explicit_hydrogens(mol)
