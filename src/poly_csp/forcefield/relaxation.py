@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Mapping
 
@@ -12,6 +12,7 @@ from openmm import unit
 
 from poly_csp.forcefield.anneal import run_heat_cool_cycle, run_temperature_ramp
 from poly_csp.forcefield.minimization import (
+    PreparedRuntimeOptimizationBundle,
     RuntimeRestraintSpec,
     TwoStageMinimizationProtocol,
     backbone_all_indices,
@@ -19,15 +20,13 @@ from poly_csp.forcefield.minimization import (
     connector_all_indices,
     new_context,
     potential_energy_kj_mol,
-    positions_nm_from_mol,
-    prepare_system_for_minimization,
-    run_two_stage_minimization,
+    prepare_runtime_optimization_bundle,
+    run_prepared_runtime_optimization,
     set_optional_parameter,
     selector_all_indices,
     update_rdkit_coords,
 )
 from poly_csp.forcefield.runtime_params import RuntimeParams, load_runtime_params
-from poly_csp.forcefield.system_builder import create_system
 from poly_csp.topology.selectors import SelectorTemplate
 
 
@@ -37,8 +36,10 @@ class RelaxSpec:
     positional_k: float
     dihedral_k: float
     hbond_k: float
-    n_stages: int = 3
-    max_iterations: int = 200
+    soft_n_stages: int = 3
+    soft_max_iterations: int = 200
+    full_max_iterations: int = 200
+    final_restraint_factor: float = 0.15
     freeze_backbone: bool = True
     anneal_enabled: bool = False
     t_start_K: float = 50.0
@@ -81,6 +82,46 @@ def _apply_stage2_anneal(
     )
 
 
+def _relaxation_restraint_spec(spec: RelaxSpec) -> RuntimeRestraintSpec:
+    return RuntimeRestraintSpec(
+        positional_k=float(spec.positional_k),
+        dihedral_k=float(spec.dihedral_k),
+        hbond_k=float(spec.hbond_k),
+        freeze_backbone=bool(spec.freeze_backbone),
+    )
+
+
+def _relaxation_protocol(spec: RelaxSpec) -> TwoStageMinimizationProtocol:
+    return TwoStageMinimizationProtocol(
+        soft_n_stages=int(spec.soft_n_stages),
+        soft_max_iterations=int(spec.soft_max_iterations),
+        full_max_iterations=int(spec.full_max_iterations),
+        final_restraint_factor=float(spec.final_restraint_factor),
+    )
+
+
+def _prepare_relaxation_bundle(
+    mol: Chem.Mol,
+    *,
+    runtime: RuntimeParams,
+    selector: SelectorTemplate | None,
+    spec: RelaxSpec,
+    mixing_rules_cfg: Mapping[str, object] | None,
+    soft_repulsion_k_kj_per_mol_nm2: float,
+    soft_repulsion_cutoff_nm: float,
+) -> PreparedRuntimeOptimizationBundle:
+    return prepare_runtime_optimization_bundle(
+        mol,
+        runtime_params=runtime,
+        selector=selector,
+        mixing_rules_cfg=mixing_rules_cfg,
+        restraint_spec=_relaxation_restraint_spec(spec),
+        protocol=_relaxation_protocol(spec),
+        soft_repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
+        soft_repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
+    )
+
+
 def run_staged_relaxation(
     mol: Chem.Mol,
     spec: RelaxSpec,
@@ -105,88 +146,47 @@ def run_staged_relaxation(
             selector_template=selector,
             work_dir=None if work_dir is None else Path(work_dir),
         )
-
-    reference_positions_nm = positions_nm_from_mol(mol)
-
-    soft_result = create_system(
+    bundle = _prepare_relaxation_bundle(
         mol,
-        glycam_params=runtime.glycam,
-        selector_params_by_name=runtime.selector_params_by_name,
-        connector_params_by_key=runtime.connector_params_by_key,
-        parameter_provenance=runtime.source_manifest,
-        nonbonded_mode="soft",
-        repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
-        repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
-        mixing_rules_cfg=mixing_rules_cfg,
-    )
-    prepare_system_for_minimization(
-        system=soft_result.system,
-        mol=mol,
-        restraint_spec=RuntimeRestraintSpec(
-            positional_k=float(spec.positional_k),
-            dihedral_k=float(spec.dihedral_k),
-            hbond_k=float(spec.hbond_k),
-            freeze_backbone=bool(spec.freeze_backbone),
-        ),
+        runtime=runtime,
         selector=selector,
-        reference_positions_nm=reference_positions_nm,
-    )
-
-    full_result = create_system(
-        mol,
-        glycam_params=runtime.glycam,
-        selector_params_by_name=runtime.selector_params_by_name,
-        connector_params_by_key=runtime.connector_params_by_key,
-        parameter_provenance=runtime.source_manifest,
-        nonbonded_mode="full",
+        spec=spec,
         mixing_rules_cfg=mixing_rules_cfg,
+        soft_repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
+        soft_repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
     )
-    prepare_system_for_minimization(
-        system=full_result.system,
-        mol=mol,
-        restraint_spec=RuntimeRestraintSpec(
-            positional_k=float(spec.positional_k),
-            dihedral_k=float(spec.dihedral_k),
-            hbond_k=float(spec.hbond_k),
-            freeze_backbone=bool(spec.freeze_backbone),
-        ),
-        selector=selector,
-        reference_positions_nm=reference_positions_nm,
-    )
-    minimization = run_two_stage_minimization(
-        soft_system=soft_result.system,
-        full_system=full_result.system,
-        initial_positions_nm=soft_result.positions_nm,
-        restraint_spec=RuntimeRestraintSpec(
-            positional_k=float(spec.positional_k),
-            dihedral_k=float(spec.dihedral_k),
-            hbond_k=float(spec.hbond_k),
-            freeze_backbone=bool(spec.freeze_backbone),
-        ),
-        protocol=TwoStageMinimizationProtocol(
-            n_stages=int(spec.n_stages),
-            soft_max_iterations=int(spec.max_iterations),
-            full_max_iterations=int(spec.max_iterations),
-            final_restraint_factor=0.15,
-        ),
-    )
+    minimization = run_prepared_runtime_optimization(bundle)
     stage2_energies = list(minimization.stage2_energies_kj_mol)
+    anneal_final_energy: float | None = None
 
     if spec.anneal_enabled and int(spec.anneal_steps) > 0:
         full_context, full_integrator = new_context(
-            full_result.system,
+            bundle.full.system,
             minimization.final_positions_nm,
         )
-        set_optional_parameter(full_context, "k_pos", float(spec.positional_k) * 0.15)
-        set_optional_parameter(full_context, "k_tors", float(spec.dihedral_k) * 0.15)
-        set_optional_parameter(full_context, "k_hb", float(spec.hbond_k) * 0.15)
+        final_factor = float(bundle.protocol.final_restraint_factor)
+        set_optional_parameter(
+            full_context,
+            "k_pos",
+            float(bundle.restraint_spec.positional_k) * final_factor,
+        )
+        set_optional_parameter(
+            full_context,
+            "k_tors",
+            float(bundle.restraint_spec.dihedral_k) * final_factor,
+        )
+        set_optional_parameter(
+            full_context,
+            "k_hb",
+            float(bundle.restraint_spec.hbond_k) * final_factor,
+        )
         _apply_stage2_anneal(full_context, full_integrator, spec)
         mm.LocalEnergyMinimizer.minimize(
             full_context,
             tolerance=10.0,
-            maxIterations=int(spec.max_iterations),
+            maxIterations=int(spec.full_max_iterations),
         )
-        stage2_energies.append(potential_energy_kj_mol(full_context))
+        anneal_final_energy = potential_energy_kj_mol(full_context)
         final_positions = full_context.getState(getPositions=True).getPositions(asNumpy=True)
         del full_context, full_integrator
     else:
@@ -202,7 +202,7 @@ def run_staged_relaxation(
     backbone_drift = 0.0
     if spec.freeze_backbone and backbone_heavy:
         init_backbone_xyz = (
-            np.asarray(reference_positions_nm.value_in_unit(unit.nanometer))[backbone_heavy]
+            np.asarray(bundle.reference_positions_nm.value_in_unit(unit.nanometer))[backbone_heavy]
             * 10.0
         )
         final_backbone_xyz = final_xyz_A[backbone_heavy]
@@ -212,21 +212,38 @@ def run_staged_relaxation(
     summary: Dict[str, object] = {
         "enabled": True,
         "protocol": "two_stage_runtime",
-        "stage1_nonbonded_mode": soft_result.nonbonded_mode,
+        "protocol_summary": asdict(bundle.protocol),
+        "restraint_summary": asdict(bundle.restraint_spec),
+        "stage1_nonbonded_mode": bundle.soft.nonbonded_mode,
         "stage1_energies_kj_mol": list(minimization.stage1_energies_kj_mol),
-        "stage2_nonbonded_mode": full_result.nonbonded_mode,
+        "stage2_nonbonded_mode": bundle.full.nonbonded_mode,
         "stage2_energies_kj_mol": stage2_energies,
+        "final_energy_kj_mol": (
+            float(anneal_final_energy)
+            if anneal_final_energy is not None
+            else float(minimization.stage2_energies_kj_mol[-1])
+        ),
         "anneal_enabled": bool(spec.anneal_enabled),
         "anneal_cool_down": bool(spec.anneal_cool_down),
+        "anneal_summary": {
+            "enabled": bool(spec.anneal_enabled),
+            "steps": int(spec.anneal_steps),
+            "cool_down": bool(spec.anneal_cool_down),
+            "t_start_K": float(spec.t_start_K),
+            "t_end_K": float(spec.t_end_K),
+            "final_energy_kj_mol": anneal_final_energy,
+        },
         "freeze_backbone": bool(spec.freeze_backbone),
         "n_backbone_atoms": len(backbone_all),
         "n_backbone_heavy_frozen": len(backbone_heavy) if spec.freeze_backbone else 0,
         "n_selector_atoms": len(selector_indices),
         "n_connector_atoms": len(connector_indices),
-        "component_counts": dict(full_result.component_counts),
-        "soft_exception_summary": dict(soft_result.exception_summary),
-        "full_exception_summary": dict(full_result.exception_summary),
-        "source_manifest": dict(full_result.source_manifest),
+        "component_counts": dict(bundle.full.component_counts),
+        "soft_exception_summary": dict(bundle.soft.exception_summary),
+        "full_exception_summary": dict(bundle.full.exception_summary),
+        "soft_force_inventory": asdict(bundle.soft.force_inventory),
+        "full_force_inventory": asdict(bundle.full.force_inventory),
+        "source_manifest": dict(bundle.full.source_manifest),
         "span_A": [float(value) for value in span.tolist()],
         "backbone_drift_A": float(backbone_drift),
     }

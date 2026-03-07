@@ -9,15 +9,15 @@ from rdkit import Chem
 
 from poly_csp.config.schema import Site
 from poly_csp.forcefield.minimization import (
+    PreparedRuntimeOptimizationBundle,
     RuntimeRestraintSpec,
     TwoStageMinimizationProtocol,
     positions_nm_from_mol,
-    prepare_system_for_minimization,
-    run_two_stage_minimization,
+    prepare_runtime_optimization_bundle,
+    run_prepared_runtime_optimization,
     update_rdkit_coords,
 )
 from poly_csp.forcefield.runtime_params import RuntimeParams, load_runtime_params
-from poly_csp.forcefield.system_builder import SystemBuildResult, create_system
 from poly_csp.ordering.hbonds import HbondMetrics, compute_hbond_metrics
 from poly_csp.ordering.rotamers import (
     RotamerGridSpec,
@@ -48,14 +48,6 @@ class OrderingSpec:
     hbond_neighbor_window: int = 1
     hbond_min_donor_angle_deg: float = 100.0
     hbond_min_acceptor_angle_deg: float = 90.0
-
-
-@dataclass(frozen=True)
-class _PreparedOrderingSystems:
-    soft: SystemBuildResult
-    full: SystemBuildResult
-    restraint_spec: RuntimeRestraintSpec
-    protocol: TwoStageMinimizationProtocol
 
 
 @dataclass(frozen=True)
@@ -116,52 +108,20 @@ def _prepare_runtime_ordering_systems(
     runtime_params: RuntimeParams,
     spec: OrderingSpec,
     mixing_rules_cfg: Mapping[str, object] | None,
-) -> _PreparedOrderingSystems:
-    reference_positions_nm = positions_nm_from_mol(mol)
-    restraint_spec = RuntimeRestraintSpec(
-        positional_k=float(spec.positional_k),
-        dihedral_k=0.0,
-        hbond_k=0.0,
-        freeze_backbone=bool(spec.freeze_backbone),
-    )
-    soft = create_system(
+) -> PreparedRuntimeOptimizationBundle:
+    return prepare_runtime_optimization_bundle(
         mol,
-        glycam_params=runtime_params.glycam,
-        selector_params_by_name=runtime_params.selector_params_by_name,
-        connector_params_by_key=runtime_params.connector_params_by_key,
-        parameter_provenance=runtime_params.source_manifest,
-        nonbonded_mode="soft",
-        mixing_rules_cfg=mixing_rules_cfg,
-    )
-    prepare_system_for_minimization(
-        system=soft.system,
-        mol=mol,
-        restraint_spec=restraint_spec,
+        runtime_params=runtime_params,
         selector=None,
-        reference_positions_nm=reference_positions_nm,
-    )
-    full = create_system(
-        mol,
-        glycam_params=runtime_params.glycam,
-        selector_params_by_name=runtime_params.selector_params_by_name,
-        connector_params_by_key=runtime_params.connector_params_by_key,
-        parameter_provenance=runtime_params.source_manifest,
-        nonbonded_mode="full",
         mixing_rules_cfg=mixing_rules_cfg,
-    )
-    prepare_system_for_minimization(
-        system=full.system,
-        mol=mol,
-        restraint_spec=restraint_spec,
-        selector=None,
-        reference_positions_nm=reference_positions_nm,
-    )
-    return _PreparedOrderingSystems(
-        soft=soft,
-        full=full,
-        restraint_spec=restraint_spec,
+        restraint_spec=RuntimeRestraintSpec(
+            positional_k=float(spec.positional_k),
+            dihedral_k=0.0,
+            hbond_k=0.0,
+            freeze_backbone=bool(spec.freeze_backbone),
+        ),
         protocol=TwoStageMinimizationProtocol(
-            n_stages=int(spec.soft_n_stages),
+            soft_n_stages=int(spec.soft_n_stages),
             soft_max_iterations=int(spec.soft_max_iterations),
             full_max_iterations=int(spec.full_max_iterations),
             final_restraint_factor=float(spec.final_restraint_factor),
@@ -173,15 +133,12 @@ def _evaluate_runtime_candidate(
     mol: Chem.Mol,
     *,
     selector: SelectorTemplate,
-    prepared: _PreparedOrderingSystems,
+    prepared: PreparedRuntimeOptimizationBundle,
     spec: OrderingSpec,
 ) -> RuntimeOrderingEvaluation:
-    minimization = run_two_stage_minimization(
-        soft_system=prepared.soft.system,
-        full_system=prepared.full.system,
+    minimization = run_prepared_runtime_optimization(
+        prepared,
         initial_positions_nm=positions_nm_from_mol(mol),
-        restraint_spec=prepared.restraint_spec,
-        protocol=prepared.protocol,
     )
     minimized = update_rdkit_coords(mol, minimization.final_positions_nm)
     hb, dmin, class_min = _ordering_diagnostics(minimized, selector, spec)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 import numpy as np
 from rdkit import Chem
@@ -14,6 +15,8 @@ from poly_csp.forcefield.restraints import (
     add_hbond_distance_restraints,
     add_positional_restraints,
 )
+from poly_csp.forcefield.runtime_params import RuntimeParams
+from poly_csp.forcefield.system_builder import SystemBuildResult, create_system
 from poly_csp.structure.dihedrals import measure_dihedral_rad
 from poly_csp.topology.atom_mapping import selector_instance_maps
 from poly_csp.topology.selectors import SelectorTemplate
@@ -29,10 +32,19 @@ class RuntimeRestraintSpec:
 
 @dataclass(frozen=True)
 class TwoStageMinimizationProtocol:
-    n_stages: int = 3
+    soft_n_stages: int = 3
     soft_max_iterations: int = 200
     full_max_iterations: int = 200
     final_restraint_factor: float = 0.15
+
+
+@dataclass(frozen=True)
+class PreparedRuntimeOptimizationBundle:
+    soft: SystemBuildResult
+    full: SystemBuildResult
+    reference_positions_nm: unit.Quantity
+    restraint_spec: RuntimeRestraintSpec
+    protocol: TwoStageMinimizationProtocol
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,79 @@ def prepare_system_for_minimization(
         )
 
 
+def prepare_runtime_optimization_bundle(
+    mol: Chem.Mol,
+    *,
+    runtime_params: RuntimeParams,
+    selector: SelectorTemplate | None,
+    mixing_rules_cfg: Mapping[str, object] | None,
+    restraint_spec: RuntimeRestraintSpec,
+    protocol: TwoStageMinimizationProtocol,
+    soft_repulsion_k_kj_per_mol_nm2: float = 800.0,
+    soft_repulsion_cutoff_nm: float = 0.6,
+) -> PreparedRuntimeOptimizationBundle:
+    reference_positions_nm = positions_nm_from_mol(mol)
+    soft = create_system(
+        mol,
+        glycam_params=runtime_params.glycam,
+        selector_params_by_name=runtime_params.selector_params_by_name,
+        connector_params_by_key=runtime_params.connector_params_by_key,
+        parameter_provenance=runtime_params.source_manifest,
+        nonbonded_mode="soft",
+        repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
+        repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
+        mixing_rules_cfg=mixing_rules_cfg,
+    )
+    prepare_system_for_minimization(
+        system=soft.system,
+        mol=mol,
+        restraint_spec=restraint_spec,
+        selector=selector,
+        reference_positions_nm=reference_positions_nm,
+    )
+    full = create_system(
+        mol,
+        glycam_params=runtime_params.glycam,
+        selector_params_by_name=runtime_params.selector_params_by_name,
+        connector_params_by_key=runtime_params.connector_params_by_key,
+        parameter_provenance=runtime_params.source_manifest,
+        nonbonded_mode="full",
+        mixing_rules_cfg=mixing_rules_cfg,
+    )
+    prepare_system_for_minimization(
+        system=full.system,
+        mol=mol,
+        restraint_spec=restraint_spec,
+        selector=selector,
+        reference_positions_nm=reference_positions_nm,
+    )
+    return PreparedRuntimeOptimizationBundle(
+        soft=soft,
+        full=full,
+        reference_positions_nm=reference_positions_nm,
+        restraint_spec=restraint_spec,
+        protocol=protocol,
+    )
+
+
+def run_prepared_runtime_optimization(
+    bundle: PreparedRuntimeOptimizationBundle,
+    *,
+    initial_positions_nm: unit.Quantity | None = None,
+) -> TwoStageMinimizationResult:
+    return run_two_stage_minimization(
+        soft_system=bundle.soft.system,
+        full_system=bundle.full.system,
+        initial_positions_nm=(
+            bundle.soft.positions_nm
+            if initial_positions_nm is None
+            else initial_positions_nm
+        ),
+        restraint_spec=bundle.restraint_spec,
+        protocol=bundle.protocol,
+    )
+
+
 def new_context(
     system: mm.System,
     positions_nm: unit.Quantity,
@@ -262,7 +347,7 @@ def run_two_stage_minimization(
     restraint_spec: RuntimeRestraintSpec,
     protocol: TwoStageMinimizationProtocol,
 ) -> TwoStageMinimizationResult:
-    n_stages = max(1, int(protocol.n_stages))
+    n_stages = max(1, int(protocol.soft_n_stages))
     stage_factors = np.linspace(1.0, float(protocol.final_restraint_factor), n_stages)
 
     soft_context, soft_integrator = new_context(soft_system, initial_positions_nm)

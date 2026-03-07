@@ -89,8 +89,10 @@ def test_pipeline_runtime_relax_selector_system(tmp_path: Path) -> None:
         "topology.selector.enabled=true "
         "topology.selector.sites=[C6] "
         "forcefield/options=runtime_relax "
-        "forcefield.options.n_stages=1 "
-        "forcefield.options.max_iterations=10 "
+        "forcefield.options.soft_n_stages=1 "
+        "forcefield.options.soft_max_iterations=10 "
+        "forcefield.options.full_max_iterations=10 "
+        "forcefield.options.final_restraint_factor=0.2 "
         "forcefield.options.anneal.n_steps=100 "
         "amber.enabled=false "
         f"output.dir={outdir}"
@@ -101,6 +103,10 @@ def test_pipeline_runtime_relax_selector_system(tmp_path: Path) -> None:
     assert report["relax_enabled"] is True
     assert report["relax_mode"] == "two_stage_runtime"
     assert report["relax_summary"]["protocol"] == "two_stage_runtime"
+    assert report["relax_summary"]["protocol_summary"]["soft_n_stages"] == 1
+    assert report["relax_summary"]["protocol_summary"]["soft_max_iterations"] == 10
+    assert report["relax_summary"]["protocol_summary"]["full_max_iterations"] == 10
+    assert report["relax_summary"]["restraint_summary"]["freeze_backbone"] is True
     assert report["relax_summary"]["n_selector_atoms"] > 0
     assert report["relax_summary"]["n_connector_atoms"] > 0
 

@@ -418,7 +418,7 @@ This path:
 * builds a real OpenMM runtime `System`,
 * fails fast on unsupported chemistry instead of falling back.
 
-Use `forcefield/options=runtime_relax` to run the canonical two-stage `soft -> full` relaxation on that same runtime system family.
+Use `forcefield/options=runtime_relax` to run the canonical two-stage `soft -> full` relaxation on that same runtime system family. Ordering and relaxation now share the same prepared runtime optimization substrate; relaxation adds only its own restraint policy and optional stage-2 anneal continuation.
 
 The build report now records:
 
@@ -435,6 +435,13 @@ The canonical runtime options are also typed and single-path. The only stage-spe
 
 * `forcefield.options.soft_repulsion_k_kj_per_mol_nm2`
 * `forcefield.options.soft_repulsion_cutoff_nm`
+
+The runtime-relax protocol fields are explicit:
+
+* `forcefield.options.soft_n_stages`
+* `forcefield.options.soft_max_iterations`
+* `forcefield.options.full_max_iterations`
+* `forcefield.options.final_restraint_factor`
 
 Those settings affect stage 1 of `forcefield/options=runtime_relax` only. They do not change the bonded terms or introduce an alternate builder path.
 
@@ -580,9 +587,19 @@ The current forcefield presets are:
    - Runs the intended two-stage relaxation:
      - stage 1: real bonded terms plus soft repulsion,
      - stage 2: real bonded terms plus full nonbonded interactions.
+   - Relaxation consumes the same prepared `soft`/`full` runtime bundle used by ordering, then optionally continues with annealing on the stage-2 `full` system.
    - The stage-1 soft-repulsion strength and cutoff come from:
      - `forcefield.options.soft_repulsion_k_kj_per_mol_nm2`
      - `forcefield.options.soft_repulsion_cutoff_nm`
+   - The protocol surface is explicit:
+     - `forcefield.options.soft_n_stages`
+     - `forcefield.options.soft_max_iterations`
+     - `forcefield.options.full_max_iterations`
+     - `forcefield.options.final_restraint_factor`
+   - The build report includes:
+     - `relax_summary.protocol_summary`
+     - `relax_summary.restraint_summary`
+     - `relax_summary.anneal_summary`
    - No generic bonded fallback is used in this path.
 
 AMBER export remains available, but it is now a downstream artifact path rather than the runtime source of backbone parameters.

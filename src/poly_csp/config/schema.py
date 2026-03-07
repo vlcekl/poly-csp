@@ -101,9 +101,11 @@ class RuntimeForcefieldOptions(BaseModel):
     positional_k: float = 5000.0
     dihedral_k: float = 500.0
     hbond_k: float = 50.0
-    n_stages: PositiveInt = 3
-    max_iterations: PositiveInt = 200
     freeze_backbone: bool = True
+    soft_n_stages: PositiveInt = 3
+    soft_max_iterations: PositiveInt = 200
+    full_max_iterations: PositiveInt = 200
+    final_restraint_factor: float = 0.15
     soft_repulsion_k_kj_per_mol_nm2: float = 800.0
     soft_repulsion_cutoff_nm: confloat(gt=0) = 0.6
     anneal: AnnealOptions = Field(default_factory=AnnealOptions)

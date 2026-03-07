@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from types import SimpleNamespace
 
-import openmm as mm
 import numpy as np
-import pytest
+import openmm as mm
 from openmm import unit
 
 from poly_csp.config.schema import HelixSpec
+from poly_csp.forcefield.minimization import (
+    PreparedRuntimeOptimizationBundle,
+    RuntimeRestraintSpec,
+    TwoStageMinimizationProtocol,
+    TwoStageMinimizationResult,
+)
 from poly_csp.forcefield.model import build_forcefield_molecule
 from poly_csp.forcefield.relaxation import RelaxSpec, run_staged_relaxation
-from poly_csp.forcefield.system_builder import SystemBuildResult
+from poly_csp.forcefield.system_builder import (
+    ForceInventorySummary,
+    SystemBuildResult,
+)
 from poly_csp.structure.backbone_builder import build_backbone_structure
 from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
 from poly_csp.topology.backbone import polymerize
@@ -75,6 +84,10 @@ def _fake_system_result(mol, nonbonded_mode: str) -> SystemBuildResult:
             repulsive.addParticle([0.2])
         system.addForce(repulsive)
         exception_summary = {"mode": "soft", "num_exclusions": 0}
+        force_inventory = ForceInventorySummary(
+            forces=("HarmonicBondForce", "CustomNonbondedForce"),
+            counts={"CustomNonbondedForce": 1, "HarmonicBondForce": 1},
+        )
     else:
         nonbonded = mm.NonbondedForce()
         nonbonded.setNonbondedMethod(mm.NonbondedForce.NoCutoff)
@@ -82,8 +95,15 @@ def _fake_system_result(mol, nonbonded_mode: str) -> SystemBuildResult:
             nonbonded.addParticle(0.0, 0.2, 0.0)
         system.addForce(nonbonded)
         exception_summary = {"exceptions_seen": 0, "exceptions_patched": 0}
+        force_inventory = ForceInventorySummary(
+            forces=("HarmonicBondForce", "NonbondedForce"),
+            counts={"HarmonicBondForce": 1, "NonbondedForce": 1},
+        )
 
-    xyz = np.asarray(build_forcefield_molecule(mol).mol.GetConformer(0).GetPositions(), dtype=float)
+    xyz = np.asarray(
+        build_forcefield_molecule(mol).mol.GetConformer(0).GetPositions(),
+        dtype=float,
+    )
     positions_nm = (xyz / 10.0) * unit.nanometer
     return SystemBuildResult(
         system=system,
@@ -92,12 +112,13 @@ def _fake_system_result(mol, nonbonded_mode: str) -> SystemBuildResult:
         nonbonded_mode=nonbonded_mode,
         topology_manifest=(),
         component_counts={"backbone": 1, "selector": 1, "connector": 1},
+        force_inventory=force_inventory,
         exception_summary=exception_summary,
         source_manifest={"fake": True},
     )
 
 
-def test_run_staged_relaxation_uses_soft_then_full_runtime_systems(monkeypatch) -> None:
+def test_run_staged_relaxation_uses_shared_runtime_bundle(monkeypatch) -> None:
     mol, selector = _forcefield_selector_mol()
     runtime = SimpleNamespace(
         glycam=None,
@@ -105,21 +126,61 @@ def test_run_staged_relaxation_uses_soft_then_full_runtime_systems(monkeypatch) 
         connector_params_by_key={},
         source_manifest={"runtime": {"cache": {"kind": "test"}}},
     )
-    calls: list[str] = []
+    calls: dict[str, object] = {}
+    soft = _fake_system_result(mol, nonbonded_mode="soft")
+    full = _fake_system_result(mol, nonbonded_mode="full")
+    bundle = PreparedRuntimeOptimizationBundle(
+        soft=soft,
+        full=full,
+        reference_positions_nm=soft.positions_nm,
+        restraint_spec=RuntimeRestraintSpec(
+            positional_k=10.0,
+            dihedral_k=0.0,
+            hbond_k=0.0,
+            freeze_backbone=False,
+        ),
+        protocol=TwoStageMinimizationProtocol(
+            soft_n_stages=1,
+            soft_max_iterations=5,
+            full_max_iterations=7,
+            final_restraint_factor=0.2,
+        ),
+    )
 
-    def fake_create_system(*args, nonbonded_mode, **kwargs):
-        calls.append(nonbonded_mode)
-        return _fake_system_result(mol, nonbonded_mode=nonbonded_mode)
+    def fake_prepare_runtime_optimization_bundle(*args, **kwargs):
+        calls["prepare"] = {"args": args, "kwargs": kwargs}
+        return bundle
 
-    monkeypatch.setattr("poly_csp.forcefield.relaxation.create_system", fake_create_system)
+    def fake_run_prepared_runtime_optimization(prepared, *, initial_positions_nm=None):
+        calls["run"] = {
+            "prepared": prepared,
+            "initial_positions_nm": initial_positions_nm,
+        }
+        return TwoStageMinimizationResult(
+            stage1_energies_kj_mol=(12.0,),
+            stage2_energies_kj_mol=(8.5,),
+            stage1_positions_nm=prepared.soft.positions_nm,
+            final_positions_nm=prepared.full.positions_nm,
+        )
+
+    monkeypatch.setattr(
+        "poly_csp.forcefield.relaxation.prepare_runtime_optimization_bundle",
+        fake_prepare_runtime_optimization_bundle,
+    )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.relaxation.run_prepared_runtime_optimization",
+        fake_run_prepared_runtime_optimization,
+    )
 
     spec = RelaxSpec(
         enabled=True,
         positional_k=10.0,
         dihedral_k=0.0,
         hbond_k=0.0,
-        n_stages=1,
-        max_iterations=5,
+        soft_n_stages=1,
+        soft_max_iterations=5,
+        full_max_iterations=7,
+        final_restraint_factor=0.2,
         freeze_backbone=False,
         anneal_enabled=False,
     )
@@ -130,11 +191,23 @@ def test_run_staged_relaxation_uses_soft_then_full_runtime_systems(monkeypatch) 
         runtime_params=runtime,
     )
 
-    assert calls == ["soft", "full"]
+    assert calls["prepare"]["args"][0] is mol
+    assert calls["prepare"]["kwargs"]["selector"] is selector
+    assert calls["prepare"]["kwargs"]["runtime_params"] is runtime
+    assert calls["run"]["prepared"] is bundle
+    assert calls["run"]["initial_positions_nm"] is None
     assert relaxed.GetNumAtoms() == mol.GetNumAtoms()
     assert relaxed.GetNumConformers() == 1
     assert summary["enabled"] is True
     assert summary["protocol"] == "two_stage_runtime"
+    assert summary["protocol_summary"] == asdict(bundle.protocol)
+    assert summary["restraint_summary"] == asdict(bundle.restraint_spec)
     assert summary["stage1_nonbonded_mode"] == "soft"
     assert summary["stage2_nonbonded_mode"] == "full"
+    assert summary["stage1_energies_kj_mol"] == [12.0]
+    assert summary["stage2_energies_kj_mol"] == [8.5]
+    assert summary["final_energy_kj_mol"] == 8.5
+    assert summary["anneal_summary"]["final_energy_kj_mol"] is None
     assert summary["source_manifest"] == {"fake": True}
+    assert summary["soft_force_inventory"]["counts"]["CustomNonbondedForce"] == 1
+    assert summary["full_force_inventory"]["counts"]["NonbondedForce"] == 1
