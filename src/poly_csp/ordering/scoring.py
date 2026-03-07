@@ -67,6 +67,12 @@ def min_interatomic_distance(
 
 
 def _atom_class(atom: Chem.Atom) -> str:
+    if atom.HasProp("_poly_csp_manifest_source"):
+        return (
+            "backbone"
+            if atom.GetProp("_poly_csp_manifest_source") == "backbone"
+            else "selector"
+        )
     return "selector" if atom.HasProp("_poly_csp_selector_instance") else "backbone"
 
 

@@ -68,6 +68,14 @@ def _first_heavy_neighbor_except(
     return None
 
 
+def _first_attached_hydrogen(mol: Chem.Mol, atom_idx: int) -> int | None:
+    atom = mol.GetAtomWithIdx(int(atom_idx))
+    for nbr in atom.GetNeighbors():
+        if nbr.GetAtomicNum() == 1:
+            return int(nbr.GetIdx())
+    return None
+
+
 def compute_hbond_metrics(
     mol: Chem.Mol,
     selector: SelectorTemplate,
@@ -103,34 +111,49 @@ def compute_hbond_metrics(
             if d_idx == a_idx:
                 continue
             total += 1
-            dist = float(np.linalg.norm(xyz[d_idx] - xyz[a_idx]))
+            donor_h = _first_attached_hydrogen(mol, d_idx)
+            if donor_h is not None:
+                dist = float(np.linalg.norm(xyz[donor_h] - xyz[a_idx]))
+            else:
+                dist = float(np.linalg.norm(xyz[d_idx] - xyz[a_idx]))
             if dist > float(max_distance_A):
                 continue
 
             satisfied_like += 1
             like_distances.append(dist)
 
-            d_proxy = _first_heavy_neighbor_except(
-                mol=mol,
-                atom_idx=d_idx,
-                excluded={a_idx},
-            )
             a_proxy = _first_heavy_neighbor_except(
                 mol=mol,
                 atom_idx=a_idx,
                 excluded={d_idx},
             )
-            if d_proxy is None or a_proxy is None:
+            if a_proxy is None:
                 continue
-
-            donor_angle = _angle_deg(
-                xyz[d_idx] - xyz[d_proxy],
-                xyz[a_idx] - xyz[d_idx],
-            )
-            acceptor_angle = _angle_deg(
-                xyz[d_idx] - xyz[a_idx],
-                xyz[a_proxy] - xyz[a_idx],
-            )
+            if donor_h is not None and a_proxy is not None:
+                donor_angle = _angle_deg(
+                    xyz[d_idx] - xyz[donor_h],
+                    xyz[a_idx] - xyz[donor_h],
+                )
+                acceptor_angle = _angle_deg(
+                    xyz[donor_h] - xyz[a_idx],
+                    xyz[a_proxy] - xyz[a_idx],
+                )
+            else:
+                d_proxy = _first_heavy_neighbor_except(
+                    mol=mol,
+                    atom_idx=d_idx,
+                    excluded={a_idx},
+                )
+                if d_proxy is None or a_proxy is None:
+                    continue
+                donor_angle = _angle_deg(
+                    xyz[d_idx] - xyz[d_proxy],
+                    xyz[a_idx] - xyz[d_idx],
+                )
+                acceptor_angle = _angle_deg(
+                    xyz[d_idx] - xyz[a_idx],
+                    xyz[a_proxy] - xyz[a_idx],
+                )
             if (
                 donor_angle >= float(min_donor_angle_deg)
                 and acceptor_angle >= float(min_acceptor_angle_deg)

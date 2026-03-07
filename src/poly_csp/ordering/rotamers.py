@@ -34,6 +34,11 @@ def default_rotamer_grid(selector_name: str) -> RotamerGridSpec:
             },
             max_candidates=64,
         )
+    if key == "tmb":
+        return RotamerGridSpec(
+            dihedral_values_deg={"tau_ar": (-120.0, 0.0, 120.0)},
+            max_candidates=32,
+        )
     return RotamerGridSpec(
         dihedral_values_deg={"tau_link": (-120.0, 0.0, 120.0)},
         max_candidates=32,

@@ -478,15 +478,23 @@ Supported export formats: `pdb`, `sdf`, `amber`.
 
 ## 7. Multi-start selector optimization
 
-The default ordering optimizer runs a single deterministic coordinate-descent pass. Multi-start mode runs N independent optimizations with different random seeds, producing diverse local minima for scoring:
+Selector ordering now runs on the canonical all-atom runtime molecule, not on a pre-forcefield geometry surrogate. Each candidate selector pose is evaluated by short two-stage `soft -> full` minimization on the real runtime system, and multi-start mode runs N independent seeded searches to sample different local minima:
 
 ```bash
 python -m poly_csp.pipelines.build_csp \
+  forcefield/options=runtime \
   multi_opt.enabled=true \
   multi_opt.n_starts=10 \
   multi_opt.top_k=5 \
   multi_opt.seed=42
 ```
+
+Ordering requires the supported runtime slice:
+
+* built-in selectors,
+* `anhydro` representation,
+* `open` end mode,
+* `forcefield/options=runtime` or `forcefield/options=runtime_relax`.
 
 ### Configuration
 
@@ -552,7 +560,8 @@ The current forcefield presets are:
 
 1. `forcefield.options.enabled=false`
    - No runtime OpenMM system is built.
-   - Output stays as deterministic construction + optional ordering result.
+   - Output stays as deterministic construction only.
+   - Selector ordering is unavailable in this mode because ordering now runs on the canonical runtime system.
 
 2. `forcefield/options=runtime`
    - Builds the canonical runtime system for the supported `anhydro`, `open` slice.

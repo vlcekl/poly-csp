@@ -377,6 +377,11 @@ def main(cfg: DictConfig) -> None:
     outdir = _ensure_outdir(
         cfg.output.dir if "output" in cfg and "dir" in cfg.output else "outputs"
     )
+    mixing_rules_cfg = (
+        OmegaConf.to_container(cfg.forcefield, resolve=True)
+        if "forcefield" in cfg and cfg.forcefield is not None
+        else None
+    )
 
     # ---- Stage 1/2: topology state -> direct explicit-H backbone build.
     template = make_glucose_template(
@@ -453,51 +458,80 @@ def main(cfg: DictConfig) -> None:
                         selector=selector,
                     )
 
-        if ordering_spec.enabled:
+    amber_summary: dict[str, object] = {"enabled": False}
+    forcefield_summary: dict[str, object] = {"enabled": False, "mode": "none"}
+    runtime_mol = build_forcefield_molecule(mol_poly).mol
+    runtime_params = None
+    runtime_cache_enabled = bool(forcefield_options.cache_enabled)
+    runtime_cache_dir = forcefield_options.cache_dir
+
+    # ---- Stage 3b: optional ordering on the canonical runtime molecule.
+    if ordering_spec.enabled:
+        if selector is None or not selector_sites:
+            ordering_summary = {
+                "enabled": False,
+                "skipped": True,
+                "reason": "no_selector",
+            }
+        else:
+            if not forcefield_enabled:
+                raise ValueError(
+                    "Selector ordering requires forcefield.options.enabled=true "
+                    "because ordering runs on the canonical runtime system."
+                )
+            runtime_params = load_runtime_params(
+                runtime_mol,
+                selector_template=selector,
+                work_dir=outdir / "runtime_params",
+                cache_enabled=runtime_cache_enabled,
+                cache_dir=runtime_cache_dir,
+            )
             multi_opt_spec = _cfg_to_multi_opt_spec(cfg)
             if multi_opt_spec.enabled:
-                # Multi-start mode: run N optimizations, keep top K.
                 ranked_results = run_multi_start_optimization(
-                    mol=mol_poly,
+                    mol=runtime_mol,
                     selector=selector,
                     sites=selector_sites,
                     dp=backbone.dp,
                     ordering_spec=ordering_spec,
                     multi_spec=multi_opt_spec,
+                    runtime_params=runtime_params,
+                    work_dir=outdir / "runtime_params",
+                    cache_enabled=runtime_cache_enabled,
+                    cache_dir=runtime_cache_dir,
+                    mixing_rules_cfg=mixing_rules_cfg,
                 )
-                # Use best result as the primary mol.
                 best = ranked_results[0]
-                mol_poly = best.mol
+                runtime_mol = best.mol
                 ordering_summary = best.summary
             else:
-                mol_poly, ordering_summary = optimize_selector_ordering(
-                    mol=mol_poly,
+                runtime_mol, ordering_summary = optimize_selector_ordering(
+                    mol=runtime_mol,
                     selector=selector,
                     sites=selector_sites,
                     dp=backbone.dp,
                     spec=ordering_spec,
+                    runtime_params=runtime_params,
+                    work_dir=outdir / "runtime_params",
+                    cache_enabled=runtime_cache_enabled,
+                    cache_dir=runtime_cache_dir,
+                    mixing_rules_cfg=mixing_rules_cfg,
                 )
                 ranked_results = None
             ordering_applied = True
-        else:
-            ranked_results = None
-
-    amber_summary: dict[str, object] = {"enabled": False}
-    forcefield_summary: dict[str, object] = {"enabled": False, "mode": "none"}
-    runtime_params = None
-    runtime_mol = build_forcefield_molecule(mol_poly).mol
-    runtime_cache_enabled = bool(forcefield_options.cache_enabled)
-    runtime_cache_dir = forcefield_options.cache_dir
+    else:
+        ranked_results = None
 
     # ---- Stage 4a: optional runtime forcefield build.
     if forcefield_enabled:
-        runtime_params = load_runtime_params(
-            runtime_mol,
-            selector_template=selector,
-            work_dir=outdir / "runtime_params",
-            cache_enabled=runtime_cache_enabled,
-            cache_dir=runtime_cache_dir,
-        )
+        if runtime_params is None:
+            runtime_params = load_runtime_params(
+                runtime_mol,
+                selector_template=selector,
+                work_dir=outdir / "runtime_params",
+                cache_enabled=runtime_cache_enabled,
+                cache_dir=runtime_cache_dir,
+            )
         built_system = create_system(
             runtime_mol,
             glycam_params=runtime_params.glycam,
@@ -509,11 +543,7 @@ def main(cfg: DictConfig) -> None:
                 forcefield_options.soft_repulsion_k_kj_per_mol_nm2
             ),
             repulsion_cutoff_nm=float(forcefield_options.soft_repulsion_cutoff_nm),
-            mixing_rules_cfg=(
-                OmegaConf.to_container(cfg.forcefield, resolve=True)
-                if "forcefield" in cfg and cfg.forcefield is not None
-                else None
-            ),
+            mixing_rules_cfg=mixing_rules_cfg,
         )
         forcefield_summary = {
             "enabled": True,
@@ -548,32 +578,28 @@ def main(cfg: DictConfig) -> None:
                 forcefield_options.soft_repulsion_k_kj_per_mol_nm2
             ),
             soft_repulsion_cutoff_nm=float(forcefield_options.soft_repulsion_cutoff_nm),
-            mixing_rules_cfg=(
-                OmegaConf.to_container(cfg.forcefield, resolve=True)
-                if "forcefield" in cfg and cfg.forcefield is not None
-                else None
-            ),
+            mixing_rules_cfg=mixing_rules_cfg,
         )
         relax_enabled = True
-        mol_poly = Chem.Mol(runtime_mol)
 
     # ---- Stage 6: QC metrics and threshold evaluation.
-    conf = mol_poly.GetConformer(0)
+    qc_mol = runtime_mol
+    conf = qc_mol.GetConformer(0)
     xyz = np.asarray(conf.GetPositions(), dtype=float).reshape((-1, 3))
-    heavy_mask = _heavy_atom_mask_from_rdkit(mol_poly)
+    heavy_mask = _heavy_atom_mask_from_rdkit(qc_mol)
 
     max_path_length = 1 + int(qc_spec.exclude_13) + int(qc_spec.exclude_14)
     excluded_pairs = (
-        bonded_exclusion_pairs(mol_poly, max_path_length=max_path_length)
+        bonded_exclusion_pairs(qc_mol, max_path_length=max_path_length)
         if qc_spec.enabled
         else set()
     )
     qc_min_dist = float(min_interatomic_distance(xyz, heavy_mask, excluded_pairs))
-    qc_class_dist_raw = min_distance_by_class(mol_poly, xyz, heavy_mask, excluded_pairs)
+    qc_class_dist_raw = min_distance_by_class(qc_mol, xyz, heavy_mask, excluded_pairs)
     qc_class_dist = {k: _finite_or_none(v) for k, v in qc_class_dist_raw.items()}
 
     k = int(helix.repeat_residues) if helix.repeat_residues else 1
-    qc_sym_rmsd = float(screw_symmetry_rmsd_from_mol(mol_poly, helix=helix, k=k))
+    qc_sym_rmsd = float(screw_symmetry_rmsd_from_mol(qc_mol, helix=helix, k=k))
 
     qc_hbond_like_fraction = 0.0
     qc_hbond_geometric_fraction = 0.0
@@ -583,12 +609,12 @@ def main(cfg: DictConfig) -> None:
     qc_selector_torsions: dict[str, dict[str, float]] = {}
     if selector is not None:
         hb = compute_hbond_metrics(
-            mol=mol_poly,
+            mol=qc_mol,
             selector=selector,
-            max_distance_A=ordering_spec.max_distance_A,
-            neighbor_window=ordering_spec.neighbor_window,
-            min_donor_angle_deg=ordering_spec.min_donor_angle_deg,
-            min_acceptor_angle_deg=ordering_spec.min_acceptor_angle_deg,
+            max_distance_A=ordering_spec.hbond_max_distance_A,
+            neighbor_window=ordering_spec.hbond_neighbor_window,
+            min_donor_angle_deg=ordering_spec.hbond_min_donor_angle_deg,
+            min_acceptor_angle_deg=ordering_spec.hbond_min_acceptor_angle_deg,
         )
         qc_hbond_like_fraction = float(hb.like_fraction)
         qc_hbond_geometric_fraction = float(hb.geometric_fraction)
@@ -596,7 +622,7 @@ def main(cfg: DictConfig) -> None:
         qc_hbond_geometric_satisfied_pairs = int(hb.geometric_satisfied_pairs)
         qc_hbond_total_pairs = int(hb.total_pairs)
         qc_selector_torsions = selector_torsion_stats(
-            mol=mol_poly,
+            mol=qc_mol,
             selector_dihedrals=selector.dihedrals,
             attach_dummy_idx=selector.attach_dummy_idx,
         )
@@ -680,7 +706,7 @@ def main(cfg: DictConfig) -> None:
     amber_enabled = "amber" in output_export_formats
     if amber_enabled:
         from poly_csp.structure.pbc import get_box_vectors_A as _get_bv
-        export_mol = runtime_mol if forcefield_enabled else mol_poly
+        export_mol = runtime_mol
         _bv = _get_bv(export_mol) if is_periodic else None
         amber_summary = export_amber_artifacts(
             mol=export_mol,
@@ -697,7 +723,7 @@ def main(cfg: DictConfig) -> None:
             box_vectors_A=_bv,
         )
 
-    forcefield_result = build_forcefield_molecule(runtime_mol if forcefield_enabled else mol_poly)
+    forcefield_result = build_forcefield_molecule(runtime_mol)
     final_mol = forcefield_result.mol
     all_atom_stats = {
         "all_atom_atom_count": int(final_mol.GetNumAtoms()),

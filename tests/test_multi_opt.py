@@ -1,52 +1,38 @@
-"""Tests for multi-start selector optimization."""
+"""Tests for multi-start forcefield-aware selector ordering."""
+
 from __future__ import annotations
 
-import numpy as np
+import math
 
-from tests.support import build_backbone_coords
-from poly_csp.topology.reactions import attach_selector
-from poly_csp.topology.monomers import make_glucose_template
-from poly_csp.topology.backbone import polymerize
-from tests.support import assign_conformer
-from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
-from poly_csp.config.schema import HelixSpec
 from poly_csp.ordering.multi_opt import MultiOptSpec, RankedResult, run_multi_start_optimization
 from poly_csp.ordering.optimize import OrderingSpec
+from poly_csp.structure.selector_library.dmpc_35 import make_35_dmpc_template
+from tests.support import build_forcefield_mol, make_fake_runtime_params
 
 
-def _helix() -> HelixSpec:
-    return HelixSpec(
-        name="test_helix",
-        theta_rad=-3.0 * np.pi / 2.0,
-        rise_A=3.7,
-        repeat_residues=4,
-        repeat_turns=3,
-        residues_per_turn=4.0 / 3.0,
-        pitch_A=3.7 * (4.0 / 3.0),
-        handedness="left",
+def _build_runtime_case(dp: int = 3):
+    selector = make_35_dmpc_template()
+    mol = build_forcefield_mol(polymer="amylose", dp=dp, selector=selector, site="C6")
+    runtime_params = make_fake_runtime_params(mol, selector=selector, site="C6")
+    return mol, selector, runtime_params
+
+
+def _ordering_spec(max_candidates: int = 8) -> OrderingSpec:
+    return OrderingSpec(
+        enabled=True,
+        repeat_residues=1,
+        max_candidates=max_candidates,
+        positional_k=1000.0,
+        soft_n_stages=1,
+        soft_max_iterations=5,
+        full_max_iterations=5,
     )
 
 
-def _build_mol(dp: int = 3):
-    template = make_glucose_template("amylose")
-    selector = make_35_dmpc_template()
-    coords = build_backbone_coords(template, _helix(), dp)
-    mol = polymerize(template=template, dp=dp, linkage="1-4", anomer="alpha")
-    mol = assign_conformer(mol, coords)
-    for i in range(dp):
-        mol = attach_selector(
-            mol_polymer=mol,
-            residue_index=i,
-            site="C6",
-            selector=selector,
-        )
-    return mol, selector
-
-
 def test_multi_start_returns_ranked_results() -> None:
-    mol, selector = _build_mol(dp=3)
-    ordering_spec = OrderingSpec(enabled=True, repeat_residues=1, max_candidates=8)
-    multi_spec = MultiOptSpec(enabled=True, n_starts=3, top_k=2, seed=42)
+    mol, selector, runtime_params = _build_runtime_case(dp=3)
+    ordering_spec = _ordering_spec(max_candidates=4)
+    multi_spec = MultiOptSpec(enabled=True, n_starts=3, top_k=2, seed=42, n_workers=1)
 
     results = run_multi_start_optimization(
         mol=mol,
@@ -55,47 +41,66 @@ def test_multi_start_returns_ranked_results() -> None:
         dp=3,
         ordering_spec=ordering_spec,
         multi_spec=multi_spec,
+        runtime_params=runtime_params,
     )
 
     assert len(results) == 2
     assert all(isinstance(r, RankedResult) for r in results)
     assert results[0].rank == 1
     assert results[1].rank == 2
-    # Scores should be descending.
     assert results[0].score >= results[1].score
-    # Mol should have correct atom count.
     assert results[0].mol.GetNumAtoms() == mol.GetNumAtoms()
+    assert results[0].summary["stage2_nonbonded_mode"] == "full"
 
 
 def test_multi_start_reproducibility() -> None:
-    mol, selector = _build_mol(dp=3)
-    ordering_spec = OrderingSpec(enabled=True, repeat_residues=1, max_candidates=8)
-    multi_spec = MultiOptSpec(enabled=True, n_starts=3, top_k=2, seed=123)
+    mol, selector, runtime_params = _build_runtime_case(dp=3)
+    ordering_spec = _ordering_spec(max_candidates=4)
+    multi_spec = MultiOptSpec(enabled=True, n_starts=3, top_k=2, seed=123, n_workers=1)
 
     run1 = run_multi_start_optimization(
-        mol=mol, selector=selector, sites=["C6"], dp=3,
-        ordering_spec=ordering_spec, multi_spec=multi_spec,
+        mol=mol,
+        selector=selector,
+        sites=["C6"],
+        dp=3,
+        ordering_spec=ordering_spec,
+        multi_spec=multi_spec,
+        runtime_params=runtime_params,
     )
     run2 = run_multi_start_optimization(
-        mol=mol, selector=selector, sites=["C6"], dp=3,
-        ordering_spec=ordering_spec, multi_spec=multi_spec,
+        mol=mol,
+        selector=selector,
+        sites=["C6"],
+        dp=3,
+        ordering_spec=ordering_spec,
+        multi_spec=multi_spec,
+        runtime_params=runtime_params,
     )
 
     assert len(run1) == len(run2)
-    for r1, r2 in zip(run1, run2):
-        assert r1.score == r2.score
-        assert r1.seed_used == r2.seed_used
-        assert r1.rank == r2.rank
+    assert sorted(result.seed_used for result in run1) == sorted(
+        result.seed_used for result in run2
+    )
+    for r1, r2 in zip(
+        sorted(run1, key=lambda result: result.seed_used),
+        sorted(run2, key=lambda result: result.seed_used),
+    ):
+        assert math.isclose(r1.score, r2.score, abs_tol=1e-2)
 
 
 def test_multi_start_no_seed_runs() -> None:
-    mol, selector = _build_mol(dp=3)
-    ordering_spec = OrderingSpec(enabled=True, repeat_residues=1, max_candidates=4)
-    multi_spec = MultiOptSpec(enabled=True, n_starts=2, top_k=2, seed=None)
+    mol, selector, runtime_params = _build_runtime_case(dp=2)
+    ordering_spec = _ordering_spec(max_candidates=4)
+    multi_spec = MultiOptSpec(enabled=True, n_starts=2, top_k=2, seed=None, n_workers=1)
 
     results = run_multi_start_optimization(
-        mol=mol, selector=selector, sites=["C6"], dp=3,
-        ordering_spec=ordering_spec, multi_spec=multi_spec,
+        mol=mol,
+        selector=selector,
+        sites=["C6"],
+        dp=2,
+        ordering_spec=ordering_spec,
+        multi_spec=multi_spec,
+        runtime_params=runtime_params,
     )
 
     assert len(results) == 2
@@ -105,12 +110,12 @@ def test_multi_start_no_seed_runs() -> None:
 def test_multi_start_falls_back_to_serial_when_process_pool_unavailable(
     monkeypatch,
 ) -> None:
-    mol, selector = _build_mol(dp=2)
-    ordering_spec = OrderingSpec(enabled=True, repeat_residues=1, max_candidates=4)
+    mol, selector, runtime_params = _build_runtime_case(dp=2)
+    ordering_spec = _ordering_spec(max_candidates=4)
     multi_spec = MultiOptSpec(enabled=True, n_starts=2, top_k=2, seed=7, n_workers=2)
 
     class _FailingPool:
-        def __init__(self, *args, **kwargs):  # noqa: D401
+        def __init__(self, *args, **kwargs):
             raise PermissionError("blocked by sandbox")
 
     import poly_csp.ordering.multi_opt as multi_mod
@@ -124,6 +129,7 @@ def test_multi_start_falls_back_to_serial_when_process_pool_unavailable(
         dp=2,
         ordering_spec=ordering_spec,
         multi_spec=multi_spec,
+        runtime_params=runtime_params,
     )
 
     assert len(results) == 2

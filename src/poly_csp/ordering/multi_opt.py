@@ -9,12 +9,14 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import PropertyPickleOptions
 
+from poly_csp.forcefield.runtime_params import RuntimeParams
 from poly_csp.topology.selectors import SelectorTemplate
 from poly_csp.config.schema import Site
 from poly_csp.ordering.rotamers import RotamerGridSpec
@@ -54,6 +56,11 @@ def _run_single_start(
     ordering_spec: OrderingSpec,
     grid: Optional[RotamerGridSpec],
     child_seed: int,
+    runtime_params: RuntimeParams | None,
+    work_dir: str | Path | None,
+    cache_enabled: bool,
+    cache_dir: str | Path | None,
+    mixing_rules_cfg: Dict[str, object] | None,
 ) -> Tuple[float, bytes, Dict[str, object], int]:
     """Run a single optimization start — designed to be called in a worker process."""
     mol = Chem.Mol(mol_binary)
@@ -65,6 +72,11 @@ def _run_single_start(
         spec=ordering_spec,
         grid=grid,
         seed=child_seed,
+        runtime_params=runtime_params,
+        work_dir=work_dir,
+        cache_enabled=cache_enabled,
+        cache_dir=cache_dir,
+        mixing_rules_cfg=mixing_rules_cfg,
     )
     score = float(summary.get("final_score", float("-inf")))
     return score, opt_mol.ToBinary(PropertyPickleOptions.AllProps), summary, child_seed
@@ -78,6 +90,12 @@ def run_multi_start_optimization(
     ordering_spec: OrderingSpec,
     multi_spec: MultiOptSpec,
     grid: RotamerGridSpec | None = None,
+    *,
+    runtime_params: RuntimeParams | None = None,
+    work_dir: str | Path | None = None,
+    cache_enabled: bool = True,
+    cache_dir: str | Path | None = None,
+    mixing_rules_cfg: Dict[str, object] | None = None,
 ) -> List[RankedResult]:
     """Run *n_starts* independent ordering optimizations and return *top_k* best.
 
@@ -119,12 +137,13 @@ def run_multi_start_optimization(
     if n_workers == 1:
         # Serial path (also used in tests / debugging).
         raw_results = [
-            _run_single_start(
-                mol_binary, selector, sites_list, dp,
-                ordering_spec, grid, seed,
-            )
-            for seed in child_seeds
-        ]
+                _run_single_start(
+                    mol_binary, selector, sites_list, dp,
+                    ordering_spec, grid, seed,
+                    runtime_params, work_dir, cache_enabled, cache_dir, mixing_rules_cfg,
+                )
+                for seed in child_seeds
+            ]
     else:
         try:
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
@@ -133,6 +152,7 @@ def run_multi_start_optimization(
                         _run_single_start,
                         mol_binary, selector, sites_list, dp,
                         ordering_spec, grid, seed,
+                        runtime_params, work_dir, cache_enabled, cache_dir, mixing_rules_cfg,
                     )
                     for seed in child_seeds
                 ]
@@ -146,12 +166,16 @@ def run_multi_start_optimization(
                 _run_single_start(
                     mol_binary, selector, sites_list, dp,
                     ordering_spec, grid, seed,
+                    runtime_params, work_dir, cache_enabled, cache_dir, mixing_rules_cfg,
                 )
                 for seed in child_seeds
             ]
 
-    # Sort descending by score.
-    raw_results.sort(key=lambda r: r[0], reverse=True)
+    # Sort descending by score, but collapse sub-millijoule numerical noise so
+    # repeated runs do not reshuffle near-tied starts nondeterministically.
+    raw_results.sort(
+        key=lambda result: (-round(float(result[0]), 3), int(result[3])),
+    )
 
     ranked: List[RankedResult] = []
     for i, (score, opt_mol_binary, summary, seed_used) in enumerate(raw_results[:top_k]):

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping
 
 import numpy as np
 from rdkit import Chem
 
-from poly_csp.structure.alignment import apply_selector_pose_dihedrals
-from poly_csp.topology.selectors import SelectorTemplate
 from poly_csp.config.schema import Site
+from poly_csp.forcefield.minimization import (
+    RuntimeRestraintSpec,
+    TwoStageMinimizationProtocol,
+    positions_nm_from_mol,
+    prepare_system_for_minimization,
+    run_two_stage_minimization,
+    update_rdkit_coords,
+)
+from poly_csp.forcefield.runtime_params import RuntimeParams, load_runtime_params
+from poly_csp.forcefield.system_builder import SystemBuildResult, create_system
 from poly_csp.ordering.hbonds import HbondMetrics, compute_hbond_metrics
 from poly_csp.ordering.rotamers import (
     RotamerGridSpec,
@@ -17,29 +26,56 @@ from poly_csp.ordering.rotamers import (
 )
 from poly_csp.ordering.scoring import (
     bonded_exclusion_pairs,
-    min_distance_by_class,
     min_distance_by_class_fast,
-    min_interatomic_distance,
     min_interatomic_distance_fast,
 )
+from poly_csp.structure.alignment import apply_selector_pose_dihedrals
+from poly_csp.topology.selectors import SelectorTemplate
 
 
 @dataclass(frozen=True)
 class OrderingSpec:
     enabled: bool = False
     repeat_residues: int = 1
-    max_distance_A: float = 3.3
-    neighbor_window: int = 1
-    min_donor_angle_deg: float = 100.0
-    min_acceptor_angle_deg: float = 90.0
-    exclude_13: bool = True
-    exclude_14: bool = False
-    min_backbone_backbone_distance_A: float = 1.05
-    min_backbone_selector_distance_A: float = 1.0
-    min_selector_selector_distance_A: float = 1.0
-    hbond_weight: float = 8.0
-    clash_weight: float = 10.0
     max_candidates: int = 64
+    positional_k: float = 5000.0
+    freeze_backbone: bool = True
+    soft_n_stages: int = 3
+    soft_max_iterations: int = 60
+    full_max_iterations: int = 120
+    final_restraint_factor: float = 0.15
+    hbond_max_distance_A: float = 3.3
+    hbond_neighbor_window: int = 1
+    hbond_min_donor_angle_deg: float = 100.0
+    hbond_min_acceptor_angle_deg: float = 90.0
+
+
+@dataclass(frozen=True)
+class _PreparedOrderingSystems:
+    soft: SystemBuildResult
+    full: SystemBuildResult
+    restraint_spec: RuntimeRestraintSpec
+    protocol: TwoStageMinimizationProtocol
+
+
+@dataclass(frozen=True)
+class RuntimeOrderingEvaluation:
+    mol: Chem.Mol
+    score: float
+    final_energy_kj_mol: float
+    stage1_energies_kj_mol: tuple[float, ...]
+    stage2_energies_kj_mol: tuple[float, ...]
+    hbond_metrics: HbondMetrics
+    min_heavy_distance_A: float
+    class_min_distance_A: dict[str, float]
+
+
+def _require_forcefield_molecule(mol: Chem.Mol) -> None:
+    if not mol.HasProp("_poly_csp_manifest_schema_version"):
+        raise ValueError(
+            "Ordering requires a forcefield-domain molecule from "
+            "build_forcefield_molecule()."
+        )
 
 
 def _heavy_mask(mol: Chem.Mol) -> np.ndarray:
@@ -53,47 +89,113 @@ def _finite_or_none(value: float) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def _objective(
+def _ordering_diagnostics(
     mol: Chem.Mol,
     selector: SelectorTemplate,
     spec: OrderingSpec,
-    use_fast: bool = True,
-) -> tuple[float, HbondMetrics, float, dict[str, float]]:
+) -> tuple[HbondMetrics, float, dict[str, float]]:
     hb = compute_hbond_metrics(
         mol=mol,
         selector=selector,
-        max_distance_A=spec.max_distance_A,
-        neighbor_window=spec.neighbor_window,
-        min_donor_angle_deg=spec.min_donor_angle_deg,
-        min_acceptor_angle_deg=spec.min_acceptor_angle_deg,
+        max_distance_A=spec.hbond_max_distance_A,
+        neighbor_window=spec.hbond_neighbor_window,
+        min_donor_angle_deg=spec.hbond_min_donor_angle_deg,
+        min_acceptor_angle_deg=spec.hbond_min_acceptor_angle_deg,
     )
     xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
-    max_path_length = 1 + int(spec.exclude_13) + int(spec.exclude_14)
-    excluded = bonded_exclusion_pairs(mol, max_path_length=max_path_length)
+    excluded = bonded_exclusion_pairs(mol, max_path_length=2)
     heavy_mask = _heavy_mask(mol)
+    dmin = float(min_interatomic_distance_fast(xyz, heavy_mask, excluded))
+    class_min = min_distance_by_class_fast(mol, xyz, heavy_mask, excluded)
+    return hb, dmin, class_min
 
-    if use_fast:
-        dmin = float(min_interatomic_distance_fast(xyz, heavy_mask, excluded))
-        class_min = min_distance_by_class_fast(mol, xyz, heavy_mask, excluded)
-    else:
-        dmin = float(min_interatomic_distance(xyz, heavy_mask, excluded))
-        class_min = min_distance_by_class(mol, xyz, heavy_mask, excluded)
 
-    bb = class_min["backbone_backbone"]
-    bs = class_min["backbone_selector"]
-    ss = class_min["selector_selector"]
-    deficit = 0.0
-    if np.isfinite(bb):
-        deficit += max(0.0, float(spec.min_backbone_backbone_distance_A) - float(bb))
-    if np.isfinite(bs):
-        deficit += max(0.0, float(spec.min_backbone_selector_distance_A) - float(bs))
-    if np.isfinite(ss):
-        deficit += max(0.0, float(spec.min_selector_selector_distance_A) - float(ss))
+def _prepare_runtime_ordering_systems(
+    mol: Chem.Mol,
+    *,
+    runtime_params: RuntimeParams,
+    spec: OrderingSpec,
+    mixing_rules_cfg: Mapping[str, object] | None,
+) -> _PreparedOrderingSystems:
+    reference_positions_nm = positions_nm_from_mol(mol)
+    restraint_spec = RuntimeRestraintSpec(
+        positional_k=float(spec.positional_k),
+        dihedral_k=0.0,
+        hbond_k=0.0,
+        freeze_backbone=bool(spec.freeze_backbone),
+    )
+    soft = create_system(
+        mol,
+        glycam_params=runtime_params.glycam,
+        selector_params_by_name=runtime_params.selector_params_by_name,
+        connector_params_by_key=runtime_params.connector_params_by_key,
+        parameter_provenance=runtime_params.source_manifest,
+        nonbonded_mode="soft",
+        mixing_rules_cfg=mixing_rules_cfg,
+    )
+    prepare_system_for_minimization(
+        system=soft.system,
+        mol=mol,
+        restraint_spec=restraint_spec,
+        selector=None,
+        reference_positions_nm=reference_positions_nm,
+    )
+    full = create_system(
+        mol,
+        glycam_params=runtime_params.glycam,
+        selector_params_by_name=runtime_params.selector_params_by_name,
+        connector_params_by_key=runtime_params.connector_params_by_key,
+        parameter_provenance=runtime_params.source_manifest,
+        nonbonded_mode="full",
+        mixing_rules_cfg=mixing_rules_cfg,
+    )
+    prepare_system_for_minimization(
+        system=full.system,
+        mol=mol,
+        restraint_spec=restraint_spec,
+        selector=None,
+        reference_positions_nm=reference_positions_nm,
+    )
+    return _PreparedOrderingSystems(
+        soft=soft,
+        full=full,
+        restraint_spec=restraint_spec,
+        protocol=TwoStageMinimizationProtocol(
+            n_stages=int(spec.soft_n_stages),
+            soft_max_iterations=int(spec.soft_max_iterations),
+            full_max_iterations=int(spec.full_max_iterations),
+            final_restraint_factor=float(spec.final_restraint_factor),
+        ),
+    )
 
-    hbond_component = float(spec.hbond_weight) * float(hb.geometric_fraction)
-    clash_component = float(spec.clash_weight) * float(deficit)
-    score = hbond_component - clash_component
-    return score, hb, dmin, class_min
+
+def _evaluate_runtime_candidate(
+    mol: Chem.Mol,
+    *,
+    selector: SelectorTemplate,
+    prepared: _PreparedOrderingSystems,
+    spec: OrderingSpec,
+) -> RuntimeOrderingEvaluation:
+    minimization = run_two_stage_minimization(
+        soft_system=prepared.soft.system,
+        full_system=prepared.full.system,
+        initial_positions_nm=positions_nm_from_mol(mol),
+        restraint_spec=prepared.restraint_spec,
+        protocol=prepared.protocol,
+    )
+    minimized = update_rdkit_coords(mol, minimization.final_positions_nm)
+    hb, dmin, class_min = _ordering_diagnostics(minimized, selector, spec)
+    final_energy = float(minimization.stage2_energies_kj_mol[-1])
+    return RuntimeOrderingEvaluation(
+        mol=minimized,
+        score=-final_energy,
+        final_energy_kj_mol=final_energy,
+        stage1_energies_kj_mol=tuple(float(x) for x in minimization.stage1_energies_kj_mol),
+        stage2_energies_kj_mol=tuple(float(x) for x in minimization.stage2_energies_kj_mol),
+        hbond_metrics=hb,
+        min_heavy_distance_A=dmin,
+        class_min_distance_A={key: float(value) for key, value in class_min.items()},
+    )
 
 
 def optimize_selector_ordering(
@@ -104,133 +206,159 @@ def optimize_selector_ordering(
     spec: OrderingSpec,
     grid: RotamerGridSpec | None = None,
     seed: int | None = None,
+    *,
+    runtime_params: RuntimeParams | None = None,
+    work_dir: str | Path | None = None,
+    cache_enabled: bool = True,
+    cache_dir: str | Path | None = None,
+    mixing_rules_cfg: Mapping[str, object] | None = None,
 ) -> tuple[Chem.Mol, Dict[str, object]]:
     """
-    Deterministic stage-4 optimizer.
+    Deterministic selector ordering on the canonical all-atom forcefield molecule.
 
-    When repeat_residues > 1, each residue within the repeat unit is
-    optimized independently (coordinate descent), then the pattern is
-    replicated periodically across the chain.
+    Candidates are evaluated by short two-stage minimization on shared soft/full
+    runtime systems. Final ranking is by the stage-2 full-system potential energy.
     """
-    if not spec.enabled:
-        baseline_score, baseline_hb, baseline_dmin, baseline_class = _objective(
-            mol, selector, spec
+    _require_forcefield_molecule(mol)
+
+    if runtime_params is None:
+        runtime_params = load_runtime_params(
+            mol,
+            selector_template=selector,
+            work_dir=None if work_dir is None else Path(work_dir),
+            cache_enabled=cache_enabled,
+            cache_dir=cache_dir,
         )
+
+    if not spec.enabled:
+        hb, dmin, class_min = _ordering_diagnostics(mol, selector, spec)
         return Chem.Mol(mol), {
             "enabled": False,
-            "baseline_score": baseline_score,
-            "baseline_hbond_like_fraction": baseline_hb.like_fraction,
-            "baseline_hbond_geometric_fraction": baseline_hb.geometric_fraction,
-            "baseline_min_heavy_distance_A": baseline_dmin,
+            "objective": "negative_stage2_energy_kj_mol",
+            "baseline_energy_kj_mol": None,
+            "baseline_hbond_like_fraction": hb.like_fraction,
+            "baseline_hbond_geometric_fraction": hb.geometric_fraction,
+            "baseline_min_heavy_distance_A": dmin,
             "baseline_class_min_distance_A": {
-                k: _finite_or_none(v) for k, v in baseline_class.items()
+                k: _finite_or_none(v) for k, v in class_min.items()
             },
-            "final_score": baseline_score,
-            "final_hbond_like_fraction": baseline_hb.like_fraction,
-            "final_hbond_geometric_fraction": baseline_hb.geometric_fraction,
-            "final_min_heavy_distance_A": baseline_dmin,
+            "final_energy_kj_mol": None,
+            "final_score": None,
+            "final_hbond_like_fraction": hb.like_fraction,
+            "final_hbond_geometric_fraction": hb.geometric_fraction,
+            "final_min_heavy_distance_A": dmin,
             "final_class_min_distance_A": {
-                k: _finite_or_none(v) for k, v in baseline_class.items()
+                k: _finite_or_none(v) for k, v in class_min.items()
             },
             "selected_pose_by_site": {},
         }
+
+    prepared = _prepare_runtime_ordering_systems(
+        mol,
+        runtime_params=runtime_params,
+        spec=spec,
+        mixing_rules_cfg=mixing_rules_cfg,
+    )
 
     grid_spec = grid or default_rotamer_grid(selector.name)
     if spec.max_candidates > 0:
         grid_spec = RotamerGridSpec(
             dihedral_values_deg=grid_spec.dihedral_values_deg,
-            max_candidates=min(grid_spec.max_candidates, spec.max_candidates),
+            max_candidates=min(grid_spec.max_candidates, int(spec.max_candidates)),
         )
     pose_library = enumerate_pose_library(grid_spec)
-
-    # Shuffle pose traversal order for diversity across multi-start runs.
     if seed is not None:
         rng = np.random.default_rng(seed)
-        indices = rng.permutation(len(pose_library))
-        pose_library = [pose_library[i] for i in indices]
+        order = rng.permutation(len(pose_library))
+        pose_library = [pose_library[int(i)] for i in order]
 
-    work = Chem.Mol(mol)
-    baseline_score, baseline_hb, baseline_dmin, baseline_class = _objective(
-        work, selector, spec
+    baseline = _evaluate_runtime_candidate(
+        Chem.Mol(mol),
+        selector=selector,
+        prepared=prepared,
+        spec=spec,
     )
+    work = baseline.mol
+    current = baseline
     selected: Dict[str, Dict[int, Dict[str, float]]] = {}
+    evaluation_count = 1
 
     repeat = max(1, min(int(spec.repeat_residues), int(dp)))
     residues = list(range(int(dp)))
 
-    for site in [str(s) for s in sites]:
-        # Per-residue coordinate descent within the repeat unit.
-        # Each residue in the repeat unit gets its own best pose.
-        per_residue_poses: Dict[int, Dict[str, float]] = {}
-
-        # Initialize: no dihedral changes (current state)
-        for r in range(repeat):
-            per_residue_poses[r] = {}
-
-        max_cd_cycles = 3  # coordinate descent iterations
-        for _cycle in range(max_cd_cycles):
+    for site in [str(site) for site in sites]:
+        per_residue_poses: Dict[int, Dict[str, float]] = {
+            residue_in_repeat: {} for residue_in_repeat in range(repeat)
+        }
+        for _ in range(3):
             improved = False
-            for res_in_repeat in range(repeat):
-                best_mol = Chem.Mol(work)
-                best_score = float("-inf")
-                best_pose: Dict[str, float] = dict(per_residue_poses[res_in_repeat])
-
+            for residue_in_repeat in range(repeat):
+                best_eval = current
+                best_pose = dict(per_residue_poses[residue_in_repeat])
                 for pose in pose_library:
                     trial = Chem.Mol(work)
-                    # Apply this candidate pose to all residues matching
-                    # this position in the repeat unit.
                     for residue_index in residues:
-                        if residue_index % repeat == res_in_repeat:
-                            trial = apply_selector_pose_dihedrals(
-                                mol=trial,
-                                residue_index=residue_index,
-                                site=site,  # type: ignore[arg-type]
-                                pose_spec=pose,
-                                selector=selector,
-                            )
-                    score, _, _, _ = _objective(trial, selector, spec)
-                    if score > best_score:
-                        best_score = score
-                        best_mol = trial
+                        if residue_index % repeat != residue_in_repeat:
+                            continue
+                        trial = apply_selector_pose_dihedrals(
+                            mol=trial,
+                            residue_index=residue_index,
+                            site=site,  # type: ignore[arg-type]
+                            pose_spec=pose,
+                            selector=selector,
+                        )
+                    trial_eval = _evaluate_runtime_candidate(
+                        trial,
+                        selector=selector,
+                        prepared=prepared,
+                        spec=spec,
+                    )
+                    evaluation_count += 1
+                    if trial_eval.score > best_eval.score + 1e-9:
+                        best_eval = trial_eval
                         best_pose = dict(pose.dihedral_targets_deg)
-                        improved = True
-
-                work = best_mol
-                per_residue_poses[res_in_repeat] = best_pose
-
+                if best_eval is not current:
+                    work = best_eval.mol
+                    current = best_eval
+                    per_residue_poses[residue_in_repeat] = best_pose
+                    improved = True
             if not improved:
-                break  # converged
-
+                break
         selected[site] = per_residue_poses
 
-    final_score, final_hb, final_dmin, final_class = _objective(work, selector, spec)
-
-    # Flatten per-residue poses for summary
-    selected_summary: Dict[str, object] = {}
-    for site_key, residue_poses in selected.items():
-        selected_summary[site_key] = {
-            str(r): pose for r, pose in residue_poses.items()
-        }
-
+    final = current
+    selected_summary: Dict[str, object] = {
+        site_key: {str(residue): pose for residue, pose in residue_poses.items()}
+        for site_key, residue_poses in selected.items()
+    }
     summary: Dict[str, object] = {
         "enabled": True,
+        "objective": "negative_stage2_energy_kj_mol",
+        "stage1_nonbonded_mode": prepared.soft.nonbonded_mode,
+        "stage2_nonbonded_mode": prepared.full.nonbonded_mode,
         "repeat_residues": repeat,
         "candidate_count": len(pose_library),
+        "evaluation_count": evaluation_count,
         "seed": seed,
-        "baseline_score": baseline_score,
-        "baseline_hbond_like_fraction": baseline_hb.like_fraction,
-        "baseline_hbond_geometric_fraction": baseline_hb.geometric_fraction,
-        "baseline_min_heavy_distance_A": baseline_dmin,
+        "baseline_energy_kj_mol": baseline.final_energy_kj_mol,
+        "baseline_stage1_energies_kj_mol": list(baseline.stage1_energies_kj_mol),
+        "baseline_stage2_energies_kj_mol": list(baseline.stage2_energies_kj_mol),
+        "baseline_hbond_like_fraction": baseline.hbond_metrics.like_fraction,
+        "baseline_hbond_geometric_fraction": baseline.hbond_metrics.geometric_fraction,
+        "baseline_min_heavy_distance_A": baseline.min_heavy_distance_A,
         "baseline_class_min_distance_A": {
-            k: _finite_or_none(v) for k, v in baseline_class.items()
+            k: _finite_or_none(v) for k, v in baseline.class_min_distance_A.items()
         },
-        "final_score": final_score,
-        "final_hbond_like_fraction": final_hb.like_fraction,
-        "final_hbond_geometric_fraction": final_hb.geometric_fraction,
-        "final_min_heavy_distance_A": final_dmin,
+        "final_energy_kj_mol": final.final_energy_kj_mol,
+        "final_score": final.score,
+        "final_stage1_energies_kj_mol": list(final.stage1_energies_kj_mol),
+        "final_stage2_energies_kj_mol": list(final.stage2_energies_kj_mol),
+        "final_hbond_like_fraction": final.hbond_metrics.like_fraction,
+        "final_hbond_geometric_fraction": final.hbond_metrics.geometric_fraction,
+        "final_min_heavy_distance_A": final.min_heavy_distance_A,
         "final_class_min_distance_A": {
-            k: _finite_or_none(v) for k, v in final_class.items()
+            k: _finite_or_none(v) for k, v in final.class_min_distance_A.items()
         },
         "selected_pose_by_site": selected_summary,
     }
-    return work, summary
+    return final.mol, summary
