@@ -265,6 +265,8 @@ def run_staged_relaxation(
     *,
     runtime_params: RuntimeParams | None = None,
     work_dir: str | Path | None = None,
+    soft_repulsion_k_kj_per_mol_nm2: float = 800.0,
+    soft_repulsion_cutoff_nm: float = 0.6,
     mixing_rules_cfg: Mapping[str, object] | None = None,
 ) -> tuple[Chem.Mol, Dict[str, object]]:
     """Run the canonical two-stage runtime relaxation on a forcefield-domain molecule."""
@@ -290,6 +292,8 @@ def run_staged_relaxation(
         connector_params_by_key=runtime.connector_params_by_key,
         parameter_provenance=runtime.source_manifest,
         nonbonded_mode="soft",
+        repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
+        repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
         mixing_rules_cfg=mixing_rules_cfg,
     )
     _prepare_system_for_relaxation(

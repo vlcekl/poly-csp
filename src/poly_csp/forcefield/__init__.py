@@ -6,6 +6,8 @@ from .glycam_mapping import map_backbone_to_glycam
 from .model import ForcefieldModelResult, build_forcefield_molecule
 from .relaxation import RelaxSpec, run_staged_relaxation
 from .system_builder import (
+    BondedTermSummary,
+    ForceInventorySummary,
     SystemBuildResult,
     build_backbone_glycam_system,
     create_system,
@@ -14,7 +16,9 @@ from .system_builder import (
 
 __all__ = [
     "export_amber_artifacts",
+    "BondedTermSummary",
     "ForcefieldModelResult",
+    "ForceInventorySummary",
     "GlycamParams",
     "RelaxSpec",
     "SystemBuildResult",

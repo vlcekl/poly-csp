@@ -425,7 +425,18 @@ The build report now records:
 * `forcefield_enabled`
 * `forcefield_mode`
 * `forcefield_summary`
+  * `bonded_term_summary`
+  * `force_inventory`
+  * nonbonded exclusions/exceptions
+  * true 1-4 exception counts by rule bucket and fine pair class
 * runtime parameter cache hits/misses and per-source provenance
+
+The canonical runtime options are also typed and single-path. The only stage-specific nonbonded knobs currently exposed are:
+
+* `forcefield.options.soft_repulsion_k_kj_per_mol_nm2`
+* `forcefield.options.soft_repulsion_cutoff_nm`
+
+Those settings affect stage 1 of `forcefield/options=runtime_relax` only. They do not change the bonded terms or introduce an alternate builder path.
 
 ---
 
@@ -549,6 +560,10 @@ The current forcefield presets are:
    - Selector atoms get GAFF-derived selector-core parameters.
    - Connector atoms get capped-fragment parameters extracted from complete selector-bearing monomer references.
    - The resulting system has real bonded terms, explicit charges, explicit Lennard-Jones parameters, and a real `NonbondedForce`.
+   - True 1-4 exceptions are classified from the final all-atom master graph and patched by the runtime mixing rules:
+     - `backbone_backbone`
+     - `selector_selector`
+     - `cross_boundary`
    - Runtime parameter payloads are cached persistently by chemistry identity.
 
 3. `forcefield/options=runtime_relax`
@@ -556,6 +571,9 @@ The current forcefield presets are:
    - Runs the intended two-stage relaxation:
      - stage 1: real bonded terms plus soft repulsion,
      - stage 2: real bonded terms plus full nonbonded interactions.
+   - The stage-1 soft-repulsion strength and cutoff come from:
+     - `forcefield.options.soft_repulsion_k_kj_per_mol_nm2`
+     - `forcefield.options.soft_repulsion_cutoff_nm`
    - No generic bonded fallback is used in this path.
 
 AMBER export remains available, but it is now a downstream artifact path rather than the runtime source of backbone parameters.

@@ -2,6 +2,8 @@ enabled: true
 relax_enabled: true
 cache_enabled: true
 cache_dir: .cache/poly_csp/runtime_params
+soft_repulsion_k_kj_per_mol_nm2: 800.0
+soft_repulsion_cutoff_nm: 0.6
 
 # Restrained relaxation controls
 positional_k: 5000.0

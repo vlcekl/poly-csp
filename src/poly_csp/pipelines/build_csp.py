@@ -36,6 +36,7 @@ from poly_csp.config.schema import (
     HelixSpec,
     MonomerRepresentation,
     PolymerKind,
+    RuntimeForcefieldOptions,
     SelectorPoseSpec,
     Site,
 )
@@ -178,77 +179,38 @@ def _cfg_to_multi_opt_spec(cfg: DictConfig) -> MultiOptSpec:
     return MultiOptSpec(**payload)
 
 
-def _cfg_to_relax_spec(cfg: DictConfig):
+def _cfg_to_forcefield_options(cfg: DictConfig) -> RuntimeForcefieldOptions:
+    if (
+        "forcefield" not in cfg
+        or cfg.forcefield is None
+        or "options" not in cfg.forcefield
+        or cfg.forcefield.options is None
+    ):
+        return RuntimeForcefieldOptions(enabled=False)
+
+    payload = OmegaConf.to_container(cfg.forcefield.options, resolve=True)
+    if not isinstance(payload, dict):
+        return RuntimeForcefieldOptions(enabled=False)
+    return RuntimeForcefieldOptions(**payload)
+
+
+def _cfg_to_relax_spec(options: RuntimeForcefieldOptions):
     if RelaxSpec is None:
         return None
-    relax_cfg = (
-        cfg.forcefield.options
-        if "forcefield" in cfg
-        and cfg.forcefield is not None
-        and "options" in cfg.forcefield
-        and cfg.forcefield.options is not None
-        else {}
-    )
-    anneal_cfg = (
-        relax_cfg.anneal
-        if hasattr(relax_cfg, "anneal") and relax_cfg.anneal is not None
-        else {}
-    )
-    enabled = bool(relax_cfg.enabled if "enabled" in relax_cfg else False)
-    relax_enabled = bool(
-        relax_cfg.relax_enabled if "relax_enabled" in relax_cfg else False
-    )
     return RelaxSpec(
-        enabled=bool(enabled and relax_enabled),
-        positional_k=float(
-            relax_cfg.positional_k if "positional_k" in relax_cfg else 5000.0
-        ),
-        dihedral_k=float(relax_cfg.dihedral_k if "dihedral_k" in relax_cfg else 500.0),
-        hbond_k=float(relax_cfg.hbond_k if "hbond_k" in relax_cfg else 50.0),
-        n_stages=int(relax_cfg.n_stages if "n_stages" in relax_cfg else 3),
-        max_iterations=int(
-            relax_cfg.max_iterations if "max_iterations" in relax_cfg else 200
-        ),
-        freeze_backbone=bool(
-            relax_cfg.freeze_backbone if "freeze_backbone" in relax_cfg else True
-        ),
-        anneal_enabled=bool(anneal_cfg.enabled if "enabled" in anneal_cfg else False),
-        t_start_K=float(anneal_cfg.t_start_K if "t_start_K" in anneal_cfg else 50.0),
-        t_end_K=float(anneal_cfg.t_end_K if "t_end_K" in anneal_cfg else 350.0),
-        anneal_steps=int(anneal_cfg.n_steps if "n_steps" in anneal_cfg else 2000),
-        anneal_cool_down=bool(
-            anneal_cfg.cool_down if "cool_down" in anneal_cfg else True
-        ),
+        enabled=bool(options.enabled and options.relax_enabled),
+        positional_k=float(options.positional_k),
+        dihedral_k=float(options.dihedral_k),
+        hbond_k=float(options.hbond_k),
+        n_stages=int(options.n_stages),
+        max_iterations=int(options.max_iterations),
+        freeze_backbone=bool(options.freeze_backbone),
+        anneal_enabled=bool(options.anneal.enabled),
+        t_start_K=float(options.anneal.t_start_K),
+        t_end_K=float(options.anneal.t_end_K),
+        anneal_steps=int(options.anneal.n_steps),
+        anneal_cool_down=bool(options.anneal.cool_down),
     )
-
-
-def _forcefield_enabled(cfg: DictConfig) -> bool:
-    return bool(
-        "forcefield" in cfg
-        and cfg.forcefield is not None
-        and "options" in cfg.forcefield
-        and cfg.forcefield.options is not None
-        and "enabled" in cfg.forcefield.options
-        and cfg.forcefield.options.enabled
-    )
-
-
-def _runtime_cache_settings(cfg: DictConfig) -> tuple[bool, str | None]:
-    options = (
-        cfg.forcefield.options
-        if "forcefield" in cfg
-        and cfg.forcefield is not None
-        and "options" in cfg.forcefield
-        and cfg.forcefield.options is not None
-        else {}
-    )
-    cache_enabled = bool(options.cache_enabled if "cache_enabled" in options else True)
-    cache_dir = (
-        str(options.cache_dir)
-        if "cache_dir" in options and options.cache_dir is not None
-        else None
-    )
-    return cache_enabled, cache_dir
 
 
 def _cfg_to_qc_spec(cfg: DictConfig) -> QcSpec:
@@ -401,10 +363,11 @@ def main(cfg: DictConfig) -> None:
     )
     ordering_spec = _cfg_to_ordering_spec(cfg)
     qc_spec = _cfg_to_qc_spec(cfg)
+    forcefield_options = _cfg_to_forcefield_options(cfg)
 
-    forcefield_enabled = _forcefield_enabled(cfg)
+    forcefield_enabled = bool(forcefield_options.enabled)
     forcefield_mode = "runtime" if forcefield_enabled else "none"
-    relax_spec = _cfg_to_relax_spec(cfg)
+    relax_spec = _cfg_to_relax_spec(forcefield_options)
     relax_requested = bool(relax_spec is not None and relax_spec.enabled)
     if relax_requested and (run_staged_relaxation is None or relax_spec is None):
         raise RuntimeError(
@@ -523,7 +486,8 @@ def main(cfg: DictConfig) -> None:
     forcefield_summary: dict[str, object] = {"enabled": False, "mode": "none"}
     runtime_params = None
     runtime_mol = build_forcefield_molecule(mol_poly).mol
-    runtime_cache_enabled, runtime_cache_dir = _runtime_cache_settings(cfg)
+    runtime_cache_enabled = bool(forcefield_options.cache_enabled)
+    runtime_cache_dir = forcefield_options.cache_dir
 
     # ---- Stage 4a: optional runtime forcefield build.
     if forcefield_enabled:
@@ -541,6 +505,10 @@ def main(cfg: DictConfig) -> None:
             connector_params_by_key=runtime_params.connector_params_by_key,
             parameter_provenance=runtime_params.source_manifest,
             nonbonded_mode="full",
+            repulsion_k_kj_per_mol_nm2=float(
+                forcefield_options.soft_repulsion_k_kj_per_mol_nm2
+            ),
+            repulsion_cutoff_nm=float(forcefield_options.soft_repulsion_cutoff_nm),
             mixing_rules_cfg=(
                 OmegaConf.to_container(cfg.forcefield, resolve=True)
                 if "forcefield" in cfg and cfg.forcefield is not None
@@ -556,6 +524,8 @@ def main(cfg: DictConfig) -> None:
             "force_count": int(built_system.system.getNumForces()),
             "topology_manifest_size": len(built_system.topology_manifest),
             "component_counts": dict(built_system.component_counts),
+            "bonded_term_summary": asdict(built_system.bonded_term_summary),
+            "force_inventory": asdict(built_system.force_inventory),
             "exception_summary": dict(built_system.exception_summary),
             "source_manifest": dict(built_system.source_manifest),
             "runtime_param_cache": asdict(runtime_params.cache_summary),
@@ -574,6 +544,10 @@ def main(cfg: DictConfig) -> None:
             spec=relax_spec,
             selector=selector,
             runtime_params=runtime_params,
+            soft_repulsion_k_kj_per_mol_nm2=float(
+                forcefield_options.soft_repulsion_k_kj_per_mol_nm2
+            ),
+            soft_repulsion_cutoff_nm=float(forcefield_options.soft_repulsion_cutoff_nm),
             mixing_rules_cfg=(
                 OmegaConf.to_container(cfg.forcefield, resolve=True)
                 if "forcefield" in cfg and cfg.forcefield is not None

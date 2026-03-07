@@ -80,11 +80,35 @@ class MixingRules(BaseModel):
     selector_selector: ScalingPair = Field(
         default_factory=lambda: ScalingPair(scee=1.2, scnb=2.0)
     )
-    cross_connector: ScalingPair = Field(
+    cross_boundary: ScalingPair = Field(
         default_factory=lambda: ScalingPair(scee=1.0, scnb=1.0)
     )
 
 
+class AnnealOptions(BaseModel):
+    enabled: bool = False
+    t_start_K: float = 50.0
+    t_end_K: float = 350.0
+    n_steps: PositiveInt = 2000
+    cool_down: bool = True
+
+
+class RuntimeForcefieldOptions(BaseModel):
+    enabled: bool = False
+    relax_enabled: bool = False
+    cache_enabled: bool = True
+    cache_dir: Optional[str] = None
+    positional_k: float = 5000.0
+    dihedral_k: float = 500.0
+    hbond_k: float = 50.0
+    n_stages: PositiveInt = 3
+    max_iterations: PositiveInt = 200
+    freeze_backbone: bool = True
+    soft_repulsion_k_kj_per_mol_nm2: float = 800.0
+    soft_repulsion_cutoff_nm: confloat(gt=0) = 0.6
+    anneal: AnnealOptions = Field(default_factory=AnnealOptions)
+
+
 class ForceFieldConfig(BaseModel):
-    options: Dict[str, object] = Field(default_factory=dict)
+    options: RuntimeForcefieldOptions = Field(default_factory=RuntimeForcefieldOptions)
     mixing_rules: MixingRules = Field(default_factory=MixingRules)

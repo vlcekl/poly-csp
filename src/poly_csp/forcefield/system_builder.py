@@ -16,16 +16,24 @@ from poly_csp.forcefield.connectors import (
     validate_connector_params,
 )
 from poly_csp.forcefield.exceptions import apply_mixing_rules
-from poly_csp.forcefield.gaff import (
-    SelectorAngleTemplate,
-    SelectorBondTemplate,
-    SelectorFragmentParams,
-    SelectorTorsionTemplate,
-)
+from poly_csp.forcefield.gaff import SelectorFragmentParams
 from poly_csp.forcefield.glycam import GlycamParams
 from poly_csp.forcefield.glycam_mapping import GlycamMappingResult, map_backbone_to_glycam
 from poly_csp.forcefield.selector_mapping import map_selector_instances
-from poly_csp.topology.atom_mapping import build_atom_map
+
+
+@dataclass(frozen=True)
+class BondedTermSummary:
+    bonds: int = 0
+    angles: int = 0
+    torsions: int = 0
+    by_source: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ForceInventorySummary:
+    forces: tuple[str, ...] = ()
+    counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -36,8 +44,104 @@ class SystemBuildResult:
     nonbonded_mode: str = "soft"
     topology_manifest: tuple[dict[str, object], ...] = ()
     component_counts: dict[str, int] = field(default_factory=dict)
+    bonded_term_summary: BondedTermSummary = field(default_factory=BondedTermSummary)
+    force_inventory: ForceInventorySummary = field(default_factory=ForceInventorySummary)
     exception_summary: dict[str, object] = field(default_factory=dict)
     source_manifest: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ResolvedSystemInputs:
+    component_counts: dict[str, int]
+    positions_nm: unit.Quantity
+    selector_params_by_name: dict[str, SelectorFragmentParams]
+    connector_params_by_key: dict[tuple[str, str], ConnectorParams]
+    backbone_mapping: GlycamMappingResult
+    selector_instance_maps: dict[int, Any]
+    connector_context_by_instance: dict[int, "_ConnectorContext"]
+    assigned_nonbonded: tuple[tuple[float, float, float], ...]
+    source_manifest: dict[str, object]
+    atom_index_by_backbone_name: dict[tuple[int, str], int]
+    residue_roles: tuple[str, ...]
+    missing_backbone_atom_keys: frozenset[tuple[int, str]]
+
+
+@dataclass
+class _BondedAssembly:
+    bond_force: mm.HarmonicBondForce = field(default_factory=mm.HarmonicBondForce)
+    angle_force: mm.HarmonicAngleForce = field(default_factory=mm.HarmonicAngleForce)
+    torsion_force: mm.PeriodicTorsionForce = field(default_factory=mm.PeriodicTorsionForce)
+    bond_owner_by_key: dict[tuple[int, int], str] = field(default_factory=dict)
+    angle_owner_by_key: dict[tuple[int, int, int], str] = field(default_factory=dict)
+    torsion_owner_by_key: dict[tuple[int, int, int, int], str] = field(default_factory=dict)
+    by_source: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def _increment(self, owner: str, term_kind: str) -> None:
+        source = _owner_summary_key(owner)
+        bucket = self.by_source.setdefault(
+            source,
+            {"bonds": 0, "angles": 0, "torsions": 0},
+        )
+        bucket[term_kind] += 1
+
+    def add_bond(self, a: int, b: int, r0, k, *, owner: str) -> None:
+        key = _bond_key(a, b)
+        if _register_term_owner(
+            self.bond_owner_by_key,
+            key,
+            owner,
+            term_kind="bond",
+        ):
+            self._increment(owner, "bonds")
+        _set_or_add_bond(self.bond_force, a, b, r0, k)
+
+    def add_angle(self, a: int, b: int, c: int, theta0, k, *, owner: str) -> None:
+        key = _angle_key(a, b, c)
+        if _register_term_owner(
+            self.angle_owner_by_key,
+            key,
+            owner,
+            term_kind="angle",
+        ):
+            self._increment(owner, "angles")
+        _set_or_add_angle(self.angle_force, a, b, c, theta0, k)
+
+    def add_torsion(
+        self,
+        a: int,
+        b: int,
+        c: int,
+        d: int,
+        periodicity: int,
+        phase_rad: float,
+        k_kj_per_mol: float,
+        *,
+        owner: str,
+    ) -> None:
+        key = _torsion_key(a, b, c, d)
+        if _register_term_owner(
+            self.torsion_owner_by_key,
+            key,
+            owner,
+            term_kind="torsion",
+        ):
+            self._increment(owner, "torsions")
+        self.torsion_force.addTorsion(a, b, c, d, periodicity, phase_rad, k_kj_per_mol)
+
+    def summary(self) -> BondedTermSummary:
+        return BondedTermSummary(
+            bonds=int(self.bond_force.getNumBonds()),
+            angles=int(self.angle_force.getNumAngles()),
+            torsions=int(self.torsion_force.getNumTorsions()),
+            by_source={
+                source: {
+                    "bonds": int(counts["bonds"]),
+                    "angles": int(counts["angles"]),
+                    "torsions": int(counts["torsions"]),
+                }
+                for source, counts in sorted(self.by_source.items())
+            },
+        )
 
 
 def _atomic_mass_dalton(z: int) -> float:
@@ -107,22 +211,27 @@ def _torsion_key(a: int, b: int, c: int, d: int) -> tuple[int, int, int, int]:
     return forward if forward <= reverse else reverse
 
 
+def _owner_summary_key(owner: str) -> str:
+    return str(owner).split(":", 1)[0]
+
+
 def _register_term_owner(
     registry: dict[tuple[int, ...], str],
     key: tuple[int, ...],
     owner: str,
     *,
     term_kind: str,
-) -> None:
+) -> bool:
     existing = registry.get(key)
     if existing is None:
         registry[key] = owner
-        return
+        return True
     if existing != owner:
         raise ValueError(
             f"Ambiguous {term_kind} ownership for atoms {key!r}: "
             f"{existing!r} vs {owner!r}."
         )
+    return False
 
 
 def _merge_source_manifest(
@@ -148,6 +257,34 @@ def _merge_source_manifest(
         key: _merge_value(base.get(key), value) if key in base else value
         for key, value in {**dict(base), **dict(extra)}.items()
     }
+
+
+def _require_mol_prop(mol: Chem.Mol, name: str) -> str:
+    if not mol.HasProp(name):
+        raise ValueError(f"Forcefield-domain molecule is missing required property {name}.")
+    return str(mol.GetProp(name))
+
+
+def _validate_runtime_support_boundary(mol: Chem.Mol) -> None:
+    polymer = _require_mol_prop(mol, "_poly_csp_polymer").strip().lower()
+    representation = _require_mol_prop(mol, "_poly_csp_representation").strip().lower()
+    end_mode = _require_mol_prop(mol, "_poly_csp_end_mode").strip().lower()
+
+    if polymer not in {"amylose", "cellulose"}:
+        raise ValueError(
+            "Canonical runtime system currently supports only amylose/cellulose polymers; "
+            f"got {polymer!r}."
+        )
+    if representation != "anhydro":
+        raise ValueError(
+            "Canonical runtime system currently supports only anhydro forcefield-domain "
+            f"molecules; got {representation!r}."
+        )
+    if end_mode != "open":
+        raise ValueError(
+            "Canonical runtime system currently supports only open-ended forcefield-domain "
+            f"molecules; got {end_mode!r}."
+        )
 
 
 def _set_or_add_bond(force: mm.HarmonicBondForce, a: int, b: int, r0, k) -> None:
@@ -357,24 +494,409 @@ def _resolve_connector_token(context: _ConnectorContext, token: ConnectorToken) 
     return context.connector_atoms_by_name[token.atom_name]
 
 
+def _resolve_system_inputs(
+    mol: Chem.Mol,
+    *,
+    glycam_params: GlycamParams,
+    selector_params_by_name: Mapping[str, SelectorFragmentParams] | None,
+    connector_params_by_key: Mapping[tuple[str, str], ConnectorParams] | None,
+) -> _ResolvedSystemInputs:
+    _validate_runtime_support_boundary(mol)
+    component_counts = _component_counts(mol)
+    positions_nm = _positions_nm_from_mol(mol)
+
+    resolved_selector_params = dict(selector_params_by_name or {})
+    resolved_connector_params = dict(connector_params_by_key or {})
+    backbone_mapping = map_backbone_to_glycam(mol, glycam_params)
+    selector_instance_maps = map_selector_instances(mol, resolved_selector_params)
+    connector_context_by_instance = _connector_contexts(
+        mol,
+        resolved_connector_params,
+        selector_instance_maps,
+    )
+
+    assigned_nonbonded: list[tuple[float, float, float] | None] = [None] * mol.GetNumAtoms()
+    source_manifest: dict[str, object] = {"glycam": dict(glycam_params.provenance)}
+
+    atom_index_by_backbone_name = {
+        (assignment.residue_index, assignment.glycam_atom_name): assignment.atom_index
+        for assignment in backbone_mapping.assignments
+    }
+    residue_roles: list[str] = []
+    if mol.HasProp("_poly_csp_dp"):
+        dp = int(mol.GetIntProp("_poly_csp_dp"))
+        for residue_index in range(dp):
+            entries = [
+                assignment
+                for assignment in backbone_mapping.assignments
+                if assignment.residue_index == residue_index
+            ]
+            if not entries:
+                raise ValueError(
+                    f"Backbone residue {residue_index} is missing from the GLYCAM mapping."
+                )
+            residue_roles.append(entries[0].residue_role)
+
+    missing_backbone_atom_keys: set[tuple[int, str]] = set()
+    for residue_index, residue_role in enumerate(residue_roles):
+        expected_names = set(glycam_params.residue_templates[residue_role].atom_names)
+        observed_names = {
+            assignment.glycam_atom_name
+            for assignment in backbone_mapping.assignments
+            if assignment.residue_index == residue_index
+        }
+        missing_backbone_atom_keys.update(
+            (residue_index, atom_name)
+            for atom_name in expected_names.difference(observed_names)
+        )
+
+    for assignment in backbone_mapping.assignments:
+        params = glycam_params.atom_params[(assignment.residue_role, assignment.glycam_atom_name)]
+        assigned_nonbonded[assignment.atom_index] = (
+            float(params.charge_e),
+            float(params.sigma_nm),
+            float(params.epsilon_kj_per_mol),
+        )
+
+    for selector_name, params in resolved_selector_params.items():
+        source_manifest.setdefault("selector", {})[selector_name] = {
+            "source_prmtop": params.source_prmtop,
+            "fragment_atom_count": params.fragment_atom_count,
+        }
+    for mapping in selector_instance_maps.values():
+        params = resolved_selector_params[mapping.selector_name]
+        for atom_name, atom_idx in mapping.atom_index_by_name.items():
+            atom_params = params.atom_params[atom_name]
+            assigned_nonbonded[atom_idx] = (
+                float(atom_params.charge_e),
+                float(atom_params.sigma_nm),
+                float(atom_params.epsilon_kj_per_mol),
+            )
+
+    for key, params in resolved_connector_params.items():
+        source_manifest.setdefault("connector", {})[f"{key[0]}:{key[1]}"] = {
+            "source_prmtop": params.source_prmtop,
+            "fragment_atom_count": params.fragment_atom_count,
+            "linkage_type": params.linkage_type,
+            "connector_role_atom_names": dict(params.connector_role_atom_names),
+        }
+    for context in connector_context_by_instance.values():
+        params = resolved_connector_params[(context.selector_name, context.site)]
+        validate_connector_params(params)
+        for atom_name, atom_idx in context.connector_atoms_by_name.items():
+            atom_params = params.atom_params[atom_name]
+            assigned_nonbonded[atom_idx] = (
+                float(atom_params.charge_e),
+                float(atom_params.sigma_nm),
+                float(atom_params.epsilon_kj_per_mol),
+            )
+
+    if any(params is None for params in assigned_nonbonded):
+        missing = [idx for idx, params in enumerate(assigned_nonbonded) if params is None]
+        raise ValueError(f"Canonical runtime system is missing atom parameters for indices {missing}.")
+
+    return _ResolvedSystemInputs(
+        component_counts=component_counts,
+        positions_nm=positions_nm,
+        selector_params_by_name=resolved_selector_params,
+        connector_params_by_key=resolved_connector_params,
+        backbone_mapping=backbone_mapping,
+        selector_instance_maps=selector_instance_maps,
+        connector_context_by_instance=connector_context_by_instance,
+        assigned_nonbonded=tuple(
+            (float(item[0]), float(item[1]), float(item[2]))
+            for item in assigned_nonbonded
+            if item is not None
+        ),
+        source_manifest=source_manifest,
+        atom_index_by_backbone_name=atom_index_by_backbone_name,
+        residue_roles=tuple(residue_roles),
+        missing_backbone_atom_keys=frozenset(missing_backbone_atom_keys),
+    )
+
+
+def _resolve_backbone_tokens(
+    inputs: _ResolvedSystemInputs,
+    anchor_residue: int,
+    tokens,
+) -> tuple[int, ...] | None:
+    resolved: list[int] = []
+    for token in tokens:
+        key = (int(anchor_residue + token.residue_offset), token.atom_name)
+        if key not in inputs.atom_index_by_backbone_name:
+            if key in inputs.missing_backbone_atom_keys:
+                return None
+            raise ValueError(
+                "Missing mapped GLYCAM atom while materializing system term: "
+                f"residue={key[0]}, atom={key[1]!r}."
+            )
+        resolved.append(inputs.atom_index_by_backbone_name[key])
+    return tuple(resolved)
+
+
+def _materialize_backbone_terms(
+    assembly: _BondedAssembly,
+    inputs: _ResolvedSystemInputs,
+    glycam_params: GlycamParams,
+) -> None:
+    for residue_index, residue_role in enumerate(inputs.residue_roles):
+        residue_template = glycam_params.residue_templates[residue_role]
+        for template in residue_template.bonds:
+            resolved = _resolve_backbone_tokens(inputs, residue_index, template.atoms)
+            if resolved is None:
+                continue
+            a, b = resolved
+            assembly.add_bond(
+                a,
+                b,
+                float(template.length_nm),
+                float(template.k_kj_per_mol_nm2),
+                owner=f"backbone:{residue_role}",
+            )
+        for template in residue_template.angles:
+            resolved = _resolve_backbone_tokens(inputs, residue_index, template.atoms)
+            if resolved is None:
+                continue
+            a, b, c = resolved
+            assembly.add_angle(
+                a,
+                b,
+                c,
+                float(template.theta0_rad),
+                float(template.k_kj_per_mol_rad2),
+                owner=f"backbone:{residue_role}",
+            )
+        for template in residue_template.torsions:
+            resolved = _resolve_backbone_tokens(inputs, residue_index, template.atoms)
+            if resolved is None:
+                continue
+            a, b, c, d = resolved
+            assembly.add_torsion(
+                a,
+                b,
+                c,
+                d,
+                int(template.periodicity),
+                float(template.phase_rad),
+                float(template.k_kj_per_mol),
+                owner=f"backbone:{residue_role}",
+            )
+
+    for left_residue in range(max(0, len(inputs.residue_roles) - 1)):
+        pair = (inputs.residue_roles[left_residue], inputs.residue_roles[left_residue + 1])
+        linkage_template = glycam_params.linkage_templates.get(pair)
+        if linkage_template is None:
+            raise ValueError(
+                "No GLYCAM linkage template is available for residue-role pair "
+                f"{pair[0]!r}->{pair[1]!r}."
+            )
+        for template in linkage_template.bonds:
+            resolved = _resolve_backbone_tokens(inputs, left_residue, template.atoms)
+            if resolved is None:
+                continue
+            a, b = resolved
+            assembly.add_bond(
+                a,
+                b,
+                float(template.length_nm),
+                float(template.k_kj_per_mol_nm2),
+                owner=f"backbone_linkage:{pair[0]}->{pair[1]}",
+            )
+        for template in linkage_template.angles:
+            resolved = _resolve_backbone_tokens(inputs, left_residue, template.atoms)
+            if resolved is None:
+                continue
+            a, b, c = resolved
+            assembly.add_angle(
+                a,
+                b,
+                c,
+                float(template.theta0_rad),
+                float(template.k_kj_per_mol_rad2),
+                owner=f"backbone_linkage:{pair[0]}->{pair[1]}",
+            )
+        for template in linkage_template.torsions:
+            resolved = _resolve_backbone_tokens(inputs, left_residue, template.atoms)
+            if resolved is None:
+                continue
+            a, b, c, d = resolved
+            assembly.add_torsion(
+                a,
+                b,
+                c,
+                d,
+                int(template.periodicity),
+                float(template.phase_rad),
+                float(template.k_kj_per_mol),
+                owner=f"backbone_linkage:{pair[0]}->{pair[1]}",
+            )
+
+
+def _materialize_selector_terms(
+    assembly: _BondedAssembly,
+    inputs: _ResolvedSystemInputs,
+) -> None:
+    for instance_id, mapping in inputs.selector_instance_maps.items():
+        params = inputs.selector_params_by_name[mapping.selector_name]
+        owner = f"selector:{mapping.selector_name}:{instance_id}"
+        for template in params.bonds:
+            assembly.add_bond(
+                mapping.atom_index_by_name[template.atom_names[0]],
+                mapping.atom_index_by_name[template.atom_names[1]],
+                float(template.length_nm),
+                float(template.k_kj_per_mol_nm2),
+                owner=owner,
+            )
+        for template in params.angles:
+            assembly.add_angle(
+                mapping.atom_index_by_name[template.atom_names[0]],
+                mapping.atom_index_by_name[template.atom_names[1]],
+                mapping.atom_index_by_name[template.atom_names[2]],
+                float(template.theta0_rad),
+                float(template.k_kj_per_mol_rad2),
+                owner=owner,
+            )
+        for template in params.torsions:
+            assembly.add_torsion(
+                mapping.atom_index_by_name[template.atom_names[0]],
+                mapping.atom_index_by_name[template.atom_names[1]],
+                mapping.atom_index_by_name[template.atom_names[2]],
+                mapping.atom_index_by_name[template.atom_names[3]],
+                int(template.periodicity),
+                float(template.phase_rad),
+                float(template.k_kj_per_mol),
+                owner=owner,
+            )
+
+
+def _materialize_connector_terms(
+    assembly: _BondedAssembly,
+    inputs: _ResolvedSystemInputs,
+) -> None:
+    for instance_id, context in inputs.connector_context_by_instance.items():
+        params = inputs.connector_params_by_key[(context.selector_name, context.site)]
+        owner = f"connector:{context.selector_name}:{context.site}:{instance_id}"
+        for template in params.bonds:
+            assembly.add_bond(
+                _resolve_connector_token(context, template.atoms[0]),
+                _resolve_connector_token(context, template.atoms[1]),
+                float(template.length_nm),
+                float(template.k_kj_per_mol_nm2),
+                owner=owner,
+            )
+        for template in params.angles:
+            assembly.add_angle(
+                _resolve_connector_token(context, template.atoms[0]),
+                _resolve_connector_token(context, template.atoms[1]),
+                _resolve_connector_token(context, template.atoms[2]),
+                float(template.theta0_rad),
+                float(template.k_kj_per_mol_rad2),
+                owner=owner,
+            )
+        for template in params.torsions:
+            assembly.add_torsion(
+                _resolve_connector_token(context, template.atoms[0]),
+                _resolve_connector_token(context, template.atoms[1]),
+                _resolve_connector_token(context, template.atoms[2]),
+                _resolve_connector_token(context, template.atoms[3]),
+                int(template.periodicity),
+                float(template.phase_rad),
+                float(template.k_kj_per_mol),
+                owner=owner,
+            )
+
+
+def _materialize_bonded_terms(
+    inputs: _ResolvedSystemInputs,
+    glycam_params: GlycamParams,
+) -> _BondedAssembly:
+    assembly = _BondedAssembly()
+    _materialize_backbone_terms(assembly, inputs, glycam_params)
+    _materialize_selector_terms(assembly, inputs)
+    _materialize_connector_terms(assembly, inputs)
+    return assembly
+
+
+def _add_nonbonded_force(
+    system: mm.System,
+    mol: Chem.Mol,
+    *,
+    assigned_nonbonded: Sequence[tuple[float, float, float]],
+    nonbonded_mode: str,
+    mixing_rules_cfg: Mapping[str, object] | None,
+    repulsion_k_kj_per_mol_nm2: float,
+    repulsion_cutoff_nm: float,
+) -> tuple[set[tuple[int, int]], dict[str, object]]:
+    bonds = [
+        (int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx()))
+        for bond in mol.GetBonds()
+    ]
+    excluded = exclusion_pairs_from_mol(mol, exclude_13=True, exclude_14=False)
+
+    if nonbonded_mode == "full":
+        nonbonded = mm.NonbondedForce()
+        nonbonded.setNonbondedMethod(mm.NonbondedForce.NoCutoff)
+        for charge_e, sigma_nm, epsilon_kj in assigned_nonbonded:
+            nonbonded.addParticle(float(charge_e), float(sigma_nm), float(epsilon_kj))
+        nonbonded.createExceptionsFromBonds(bonds, 1.0, 1.0)
+        system.addForce(nonbonded)
+        exception_summary = apply_mixing_rules(
+            nonbonded=nonbonded,
+            mol=mol,
+            mixing_rules_cfg=mixing_rules_cfg,
+        )
+        exception_summary.update(
+            {
+                "mode": "full",
+                "force_kind": "NonbondedForce",
+                "num_bonds": len(bonds),
+                "num_exclusions": len(excluded),
+                "num_particles": len(assigned_nonbonded),
+            }
+        )
+        return excluded, exception_summary
+
+    repulsive = mm.CustomNonbondedForce(
+        "k_rep*step(sigma-r)*(sigma-r)^2;"
+        "sigma=0.5*(sigma1+sigma2)"
+    )
+    repulsive.addGlobalParameter("k_rep", float(repulsion_k_kj_per_mol_nm2))
+    repulsive.addPerParticleParameter("sigma")
+    repulsive.setNonbondedMethod(mm.CustomNonbondedForce.CutoffNonPeriodic)
+    repulsive.setCutoffDistance(float(repulsion_cutoff_nm) * unit.nanometer)
+    for atom_idx in range(mol.GetNumAtoms()):
+        repulsive.addParticle([_soft_sigma_nm(assigned_nonbonded, atom_idx)])
+    for i, j in sorted(excluded):
+        repulsive.addExclusion(int(i), int(j))
+    system.addForce(repulsive)
+    return excluded, {
+        "mode": "soft",
+        "force_kind": "CustomNonbondedForce",
+        "num_bonds": len(bonds),
+        "num_exclusions": len(excluded),
+        "num_particles": len(assigned_nonbonded),
+        "repulsion_k_kj_per_mol_nm2": float(repulsion_k_kj_per_mol_nm2),
+        "repulsion_cutoff_nm": float(repulsion_cutoff_nm),
+    }
+
+
+def _collect_force_inventory(system: mm.System) -> ForceInventorySummary:
+    forces = tuple(system.getForce(i).__class__.__name__ for i in range(system.getNumForces()))
+    counts: dict[str, int] = {}
+    for force_name in forces:
+        counts[force_name] = counts.get(force_name, 0) + 1
+    return ForceInventorySummary(
+        forces=forces,
+        counts={name: int(count) for name, count in sorted(counts.items())},
+    )
+
+
 def _soft_sigma_nm(
-    assigned_nonbonded: list[tuple[float, float, float] | None],
+    assigned_nonbonded: Sequence[tuple[float, float, float]],
     atom_idx: int,
-    atom: Chem.Atom,
 ) -> float:
     params = assigned_nonbonded[atom_idx]
-    if params is not None:
-        return float(params[1])
-    z = atom.GetAtomicNum()
-    if z <= 1:
-        return 0.11
-    if z == 6:
-        return 0.17
-    if z == 7:
-        return 0.155
-    if z == 8:
-        return 0.152
-    return 0.17
+    return float(params[1])
 
 
 def create_system(
@@ -397,330 +919,45 @@ def create_system(
     if nonbonded_mode not in {"soft", "full"}:
         raise ValueError(f"Unsupported nonbonded_mode {nonbonded_mode!r}.")
 
-    selector_params_by_name = dict(selector_params_by_name or {})
-    connector_params_by_key = dict(connector_params_by_key or {})
-    positions_nm = _positions_nm_from_mol(mol)
-    n_atoms = mol.GetNumAtoms()
-
-    backbone_mapping = map_backbone_to_glycam(mol, glycam_params)
-    selector_instance_maps = map_selector_instances(mol, selector_params_by_name)
-    connector_context_by_instance = _connector_contexts(
+    inputs = _resolve_system_inputs(
         mol,
-        connector_params_by_key,
-        selector_instance_maps,
+        glycam_params=glycam_params,
+        selector_params_by_name=selector_params_by_name,
+        connector_params_by_key=connector_params_by_key,
     )
 
     system = mm.System()
     for atom in mol.GetAtoms():
         system.addParticle(_atomic_mass_dalton(atom.GetAtomicNum()) * unit.dalton)
 
-    assigned_nonbonded: list[tuple[float, float, float] | None] = [None] * n_atoms
-    source_manifest: dict[str, object] = {"glycam": dict(glycam_params.provenance)}
+    bonded_assembly = _materialize_bonded_terms(inputs, glycam_params)
+    system.addForce(bonded_assembly.bond_force)
+    system.addForce(bonded_assembly.angle_force)
+    if bonded_assembly.torsion_force.getNumTorsions() > 0:
+        system.addForce(bonded_assembly.torsion_force)
 
-    atom_index_by_backbone_name = {
-        (assignment.residue_index, assignment.glycam_atom_name): assignment.atom_index
-        for assignment in backbone_mapping.assignments
-    }
-    residue_roles: list[str] = []
-    if mol.HasProp("_poly_csp_dp"):
-        dp = int(mol.GetIntProp("_poly_csp_dp"))
-        for residue_index in range(dp):
-            entries = [
-                assignment
-                for assignment in backbone_mapping.assignments
-                if assignment.residue_index == residue_index
-            ]
-            if not entries:
-                raise ValueError(f"Backbone residue {residue_index} is missing from the GLYCAM mapping.")
-            residue_roles.append(entries[0].residue_role)
-    missing_backbone_atom_keys: set[tuple[int, str]] = set()
-    for residue_index, residue_role in enumerate(residue_roles):
-        expected_names = set(glycam_params.residue_templates[residue_role].atom_names)
-        observed_names = {
-            assignment.glycam_atom_name
-            for assignment in backbone_mapping.assignments
-            if assignment.residue_index == residue_index
-        }
-        missing_backbone_atom_keys.update(
-            (residue_index, atom_name)
-            for atom_name in expected_names.difference(observed_names)
-        )
-
-    for assignment in backbone_mapping.assignments:
-        params = glycam_params.atom_params[(assignment.residue_role, assignment.glycam_atom_name)]
-        assigned_nonbonded[assignment.atom_index] = (
-            float(params.charge_e),
-            float(params.sigma_nm),
-            float(params.epsilon_kj_per_mol),
-        )
-
-    for selector_name, params in selector_params_by_name.items():
-        source_manifest.setdefault("selector", {})[selector_name] = {
-            "source_prmtop": params.source_prmtop,
-            "fragment_atom_count": params.fragment_atom_count,
-        }
-    for instance_id, mapping in selector_instance_maps.items():
-        params = selector_params_by_name[mapping.selector_name]
-        for atom_name, atom_idx in mapping.atom_index_by_name.items():
-            atom_params = params.atom_params[atom_name]
-            assigned_nonbonded[atom_idx] = (
-                float(atom_params.charge_e),
-                float(atom_params.sigma_nm),
-                float(atom_params.epsilon_kj_per_mol),
-            )
-
-    for key, params in connector_params_by_key.items():
-        source_manifest.setdefault("connector", {})[f"{key[0]}:{key[1]}"] = {
-            "source_prmtop": params.source_prmtop,
-            "fragment_atom_count": params.fragment_atom_count,
-            "linkage_type": params.linkage_type,
-            "connector_role_atom_names": dict(params.connector_role_atom_names),
-        }
-    for instance_id, context in connector_context_by_instance.items():
-        params = connector_params_by_key[(context.selector_name, context.site)]
-        validate_connector_params(params)
-        for atom_name, atom_idx in context.connector_atoms_by_name.items():
-            atom_params = params.atom_params[atom_name]
-            assigned_nonbonded[atom_idx] = (
-                float(atom_params.charge_e),
-                float(atom_params.sigma_nm),
-                float(atom_params.epsilon_kj_per_mol),
-            )
-
-    if any(params is None for params in assigned_nonbonded):
-        missing = [idx for idx, params in enumerate(assigned_nonbonded) if params is None]
-        raise ValueError(f"Canonical runtime system is missing atom parameters for indices {missing}.")
-
-    bond_force = mm.HarmonicBondForce()
-    angle_force = mm.HarmonicAngleForce()
-    torsion_force = mm.PeriodicTorsionForce()
-    bond_owner_by_key: dict[tuple[int, int], str] = {}
-    angle_owner_by_key: dict[tuple[int, int, int], str] = {}
-    torsion_owner_by_key: dict[tuple[int, int, int, int], str] = {}
-
-    def _resolve_backbone_tokens(anchor_residue: int, tokens) -> tuple[int, ...] | None:
-        resolved: list[int] = []
-        for token in tokens:
-            key = (int(anchor_residue + token.residue_offset), token.atom_name)
-            if key not in atom_index_by_backbone_name:
-                if key in missing_backbone_atom_keys:
-                    return None
-                raise ValueError(
-                    "Missing mapped GLYCAM atom while materializing system term: "
-                    f"residue={key[0]}, atom={key[1]!r}."
-                )
-            resolved.append(atom_index_by_backbone_name[key])
-        return tuple(resolved)
-
-    for residue_index, residue_role in enumerate(residue_roles):
-        residue_template = glycam_params.residue_templates[residue_role]
-        for template in residue_template.bonds:
-            resolved = _resolve_backbone_tokens(residue_index, template.atoms)
-            if resolved is None:
-                continue
-            a, b = resolved
-            _register_term_owner(
-                bond_owner_by_key,
-                _bond_key(a, b),
-                f"backbone:{residue_role}",
-                term_kind="bond",
-            )
-            _set_or_add_bond(bond_force, a, b, float(template.length_nm), float(template.k_kj_per_mol_nm2))
-        for template in residue_template.angles:
-            resolved = _resolve_backbone_tokens(residue_index, template.atoms)
-            if resolved is None:
-                continue
-            a, b, c = resolved
-            _register_term_owner(
-                angle_owner_by_key,
-                _angle_key(a, b, c),
-                f"backbone:{residue_role}",
-                term_kind="angle",
-            )
-            _set_or_add_angle(angle_force, a, b, c, float(template.theta0_rad), float(template.k_kj_per_mol_rad2))
-        for template in residue_template.torsions:
-            resolved = _resolve_backbone_tokens(residue_index, template.atoms)
-            if resolved is None:
-                continue
-            a, b, c, d = resolved
-            _register_term_owner(
-                torsion_owner_by_key,
-                _torsion_key(a, b, c, d),
-                f"backbone:{residue_role}",
-                term_kind="torsion",
-            )
-            torsion_force.addTorsion(a, b, c, d, int(template.periodicity), float(template.phase_rad), float(template.k_kj_per_mol))
-
-    for left_residue in range(max(0, len(residue_roles) - 1)):
-        pair = (residue_roles[left_residue], residue_roles[left_residue + 1])
-        linkage_template = glycam_params.linkage_templates.get(pair)
-        if linkage_template is None:
-            raise ValueError(
-                "No GLYCAM linkage template is available for residue-role pair "
-                f"{pair[0]!r}->{pair[1]!r}."
-            )
-        for template in linkage_template.bonds:
-            resolved = _resolve_backbone_tokens(left_residue, template.atoms)
-            if resolved is None:
-                continue
-            a, b = resolved
-            _register_term_owner(
-                bond_owner_by_key,
-                _bond_key(a, b),
-                f"backbone_linkage:{pair[0]}->{pair[1]}",
-                term_kind="bond",
-            )
-            _set_or_add_bond(bond_force, a, b, float(template.length_nm), float(template.k_kj_per_mol_nm2))
-        for template in linkage_template.angles:
-            resolved = _resolve_backbone_tokens(left_residue, template.atoms)
-            if resolved is None:
-                continue
-            a, b, c = resolved
-            _register_term_owner(
-                angle_owner_by_key,
-                _angle_key(a, b, c),
-                f"backbone_linkage:{pair[0]}->{pair[1]}",
-                term_kind="angle",
-            )
-            _set_or_add_angle(angle_force, a, b, c, float(template.theta0_rad), float(template.k_kj_per_mol_rad2))
-        for template in linkage_template.torsions:
-            resolved = _resolve_backbone_tokens(left_residue, template.atoms)
-            if resolved is None:
-                continue
-            a, b, c, d = resolved
-            _register_term_owner(
-                torsion_owner_by_key,
-                _torsion_key(a, b, c, d),
-                f"backbone_linkage:{pair[0]}->{pair[1]}",
-                term_kind="torsion",
-            )
-            torsion_force.addTorsion(a, b, c, d, int(template.periodicity), float(template.phase_rad), float(template.k_kj_per_mol))
-
-    for instance_id, mapping in selector_instance_maps.items():
-        params = selector_params_by_name[mapping.selector_name]
-        for template in params.bonds:
-            a = mapping.atom_index_by_name[template.atom_names[0]]
-            b = mapping.atom_index_by_name[template.atom_names[1]]
-            _register_term_owner(
-                bond_owner_by_key,
-                _bond_key(a, b),
-                f"selector:{mapping.selector_name}:{instance_id}",
-                term_kind="bond",
-            )
-            _set_or_add_bond(bond_force, a, b, float(template.length_nm), float(template.k_kj_per_mol_nm2))
-        for template in params.angles:
-            a = mapping.atom_index_by_name[template.atom_names[0]]
-            b = mapping.atom_index_by_name[template.atom_names[1]]
-            c = mapping.atom_index_by_name[template.atom_names[2]]
-            _register_term_owner(
-                angle_owner_by_key,
-                _angle_key(a, b, c),
-                f"selector:{mapping.selector_name}:{instance_id}",
-                term_kind="angle",
-            )
-            _set_or_add_angle(angle_force, a, b, c, float(template.theta0_rad), float(template.k_kj_per_mol_rad2))
-        for template in params.torsions:
-            a = mapping.atom_index_by_name[template.atom_names[0]]
-            b = mapping.atom_index_by_name[template.atom_names[1]]
-            c = mapping.atom_index_by_name[template.atom_names[2]]
-            d = mapping.atom_index_by_name[template.atom_names[3]]
-            _register_term_owner(
-                torsion_owner_by_key,
-                _torsion_key(a, b, c, d),
-                f"selector:{mapping.selector_name}:{instance_id}",
-                term_kind="torsion",
-            )
-            torsion_force.addTorsion(a, b, c, d, int(template.periodicity), float(template.phase_rad), float(template.k_kj_per_mol))
-
-    for instance_id, context in connector_context_by_instance.items():
-        params = connector_params_by_key[(context.selector_name, context.site)]
-        for template in params.bonds:
-            a = _resolve_connector_token(context, template.atoms[0])
-            b = _resolve_connector_token(context, template.atoms[1])
-            _register_term_owner(
-                bond_owner_by_key,
-                _bond_key(a, b),
-                f"connector:{context.selector_name}:{context.site}:{instance_id}",
-                term_kind="bond",
-            )
-            _set_or_add_bond(bond_force, a, b, float(template.length_nm), float(template.k_kj_per_mol_nm2))
-        for template in params.angles:
-            a = _resolve_connector_token(context, template.atoms[0])
-            b = _resolve_connector_token(context, template.atoms[1])
-            c = _resolve_connector_token(context, template.atoms[2])
-            _register_term_owner(
-                angle_owner_by_key,
-                _angle_key(a, b, c),
-                f"connector:{context.selector_name}:{context.site}:{instance_id}",
-                term_kind="angle",
-            )
-            _set_or_add_angle(angle_force, a, b, c, float(template.theta0_rad), float(template.k_kj_per_mol_rad2))
-        for template in params.torsions:
-            a = _resolve_connector_token(context, template.atoms[0])
-            b = _resolve_connector_token(context, template.atoms[1])
-            c = _resolve_connector_token(context, template.atoms[2])
-            d = _resolve_connector_token(context, template.atoms[3])
-            _register_term_owner(
-                torsion_owner_by_key,
-                _torsion_key(a, b, c, d),
-                f"connector:{context.selector_name}:{context.site}:{instance_id}",
-                term_kind="torsion",
-            )
-            torsion_force.addTorsion(a, b, c, d, int(template.periodicity), float(template.phase_rad), float(template.k_kj_per_mol))
-
-    system.addForce(bond_force)
-    system.addForce(angle_force)
-    if torsion_force.getNumTorsions() > 0:
-        system.addForce(torsion_force)
-
-    bonds = [
-        (int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx()))
-        for bond in mol.GetBonds()
-    ]
-    if nonbonded_mode == "full":
-        nonbonded = mm.NonbondedForce()
-        nonbonded.setNonbondedMethod(mm.NonbondedForce.NoCutoff)
-        for charge_e, sigma_nm, epsilon_kj in assigned_nonbonded:
-            nonbonded.addParticle(float(charge_e), float(sigma_nm), float(epsilon_kj))
-        nonbonded.createExceptionsFromBonds(bonds, 1.0 / 1.2, 1.0 / 2.0)
-        system.addForce(nonbonded)
-        exception_summary = apply_mixing_rules(
-            system=system,
-            atom_map=build_atom_map(mol),
-            mixing_rules_cfg=mixing_rules_cfg,
-        )
-        exception_summary["num_bonds"] = len(bonds)
-        excluded = exclusion_pairs_from_mol(mol, exclude_13=True, exclude_14=False)
-    else:
-        repulsive = mm.CustomNonbondedForce(
-            "k_rep*step(sigma-r)*(sigma-r)^2;"
-            "sigma=0.5*(sigma1+sigma2)"
-        )
-        repulsive.addGlobalParameter("k_rep", float(repulsion_k_kj_per_mol_nm2))
-        repulsive.addPerParticleParameter("sigma")
-        repulsive.setNonbondedMethod(mm.CustomNonbondedForce.CutoffNonPeriodic)
-        repulsive.setCutoffDistance(float(repulsion_cutoff_nm) * unit.nanometer)
-        for atom_idx, atom in enumerate(mol.GetAtoms()):
-            repulsive.addParticle([_soft_sigma_nm(assigned_nonbonded, atom_idx, atom)])
-        excluded = exclusion_pairs_from_mol(mol, exclude_13=True, exclude_14=False)
-        for i, j in sorted(excluded):
-            repulsive.addExclusion(int(i), int(j))
-        system.addForce(repulsive)
-        exception_summary = {
-            "mode": "soft",
-            "num_bonds": len(bonds),
-            "num_exclusions": len(excluded),
-        }
+    excluded, exception_summary = _add_nonbonded_force(
+        system,
+        mol,
+        assigned_nonbonded=inputs.assigned_nonbonded,
+        nonbonded_mode=nonbonded_mode,
+        mixing_rules_cfg=mixing_rules_cfg,
+        repulsion_k_kj_per_mol_nm2=float(repulsion_k_kj_per_mol_nm2),
+        repulsion_cutoff_nm=float(repulsion_cutoff_nm),
+    )
+    force_inventory = _collect_force_inventory(system)
 
     return SystemBuildResult(
         system=system,
-        positions_nm=positions_nm,
+        positions_nm=inputs.positions_nm,
         excluded_pairs=excluded,
         nonbonded_mode=nonbonded_mode,
-        topology_manifest=_topology_manifest(mol, backbone_mapping),
-        component_counts=_component_counts(mol),
+        topology_manifest=_topology_manifest(mol, inputs.backbone_mapping),
+        component_counts=inputs.component_counts,
+        bonded_term_summary=bonded_assembly.summary(),
+        force_inventory=force_inventory,
         exception_summary=exception_summary,
-        source_manifest=_merge_source_manifest(source_manifest, parameter_provenance),
+        source_manifest=_merge_source_manifest(inputs.source_manifest, parameter_provenance),
     )
 
 
@@ -728,7 +965,7 @@ def build_backbone_glycam_system(
     mol: Chem.Mol,
     glycam_params: GlycamParams,
 ) -> SystemBuildResult:
-    """Build a pure-backbone system from the canonical runtime builder."""
+    """Build a pure-backbone specialization of the canonical runtime builder."""
     for atom in mol.GetAtoms():
         if atom.HasProp("_poly_csp_manifest_source") and atom.GetProp("_poly_csp_manifest_source") != "backbone":
             raise ValueError("build_backbone_glycam_system() supports pure backbone molecules only.")

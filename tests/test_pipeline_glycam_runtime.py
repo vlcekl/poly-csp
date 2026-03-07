@@ -47,6 +47,10 @@ def test_pipeline_runtime_amylose(tmp_path: Path) -> None:
     assert report["forcefield_mode"] == "runtime"
     assert report["forcefield_summary"]["nonbonded_mode"] == "full"
     assert report["forcefield_summary"]["particle_count"] > 0
+    assert report["forcefield_summary"]["bonded_term_summary"]["bonds"] > 0
+    assert report["forcefield_summary"]["force_inventory"]["counts"]["NonbondedForce"] == 1
+    assert report["forcefield_summary"]["exception_summary"]["expected_14_pairs"] > 0
+    assert report["forcefield_summary"]["exception_summary"]["expected_14_pairs"] == report["forcefield_summary"]["exception_summary"]["found_14_pairs"]
     assert report["relax_enabled"] is False
 
 
@@ -66,6 +70,8 @@ def test_pipeline_runtime_cellulose(tmp_path: Path) -> None:
     assert report["polymer"] == "cellulose"
     assert report["forcefield_mode"] == "runtime"
     assert report["forcefield_summary"]["particle_count"] > 0
+    assert report["forcefield_summary"]["force_inventory"]["counts"]["NonbondedForce"] == 1
+    assert report["forcefield_summary"]["exception_summary"]["counts_by_rule_bucket"]["backbone_backbone"] > 0
 
 
 @pytest.mark.skipif(
