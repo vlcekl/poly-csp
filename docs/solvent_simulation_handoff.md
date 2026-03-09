@@ -81,6 +81,68 @@ Important anti-patterns to avoid:
 - permissive loaders that “fix up” broken atom mappings instead of rejecting them
 
 
+## Environment Strategy
+
+The easiest setup path is to mirror the current `poly_csp` conda environment and extend it minimally.
+
+Do not design the new project around a completely different Python stack unless there is a compelling reason.
+
+Base rule:
+
+- start from the current `poly_csp` `environment.yml`
+- keep the same core channels and core package family
+- add only the extra packages needed for explicit-solvent assembly, simulation analysis, and workflow execution
+
+Why this matters:
+
+- the current project already depends on a compatible Amber-family chemistry stack
+- the dry receptor handoff already assumes RDKit, OpenMM, ParmEd, AmberTools, and Hydra
+- using the same base environment reduces cross-project incompatibility and debugging overhead
+
+The current base environment is defined in [environment.yml](/home/lukas/work/projects/chiral_csp_poly/environment.yml) and already includes:
+
+- Python 3.10-3.12
+- NumPy / SciPy
+- RDKit
+- OpenMM
+- AmberTools
+- ParmEd
+- Pydantic
+- Hydra / OmegaConf
+- pytest / ruff / black / mypy
+
+Recommended approach for the new project:
+
+- create a separate environment such as `polycsp-solvate`
+- copy the current `poly_csp` environment definition as the starting point
+- add only the explicit-solvent extras on top
+
+Recommended additional packages for the new project:
+
+- `packmol`
+- `mdtraj` or `MDAnalysis`
+- any small workflow or serialization utilities actually needed by the implementation
+
+Keep package additions disciplined:
+
+- prefer `conda-forge` packages where possible
+- avoid mixing unrelated package channels unless required
+- avoid large optional ecosystems until a real use case exists
+- do not add multiple overlapping analysis libraries unless both are actively used
+
+Environment design goal:
+
+- a near-mirror of the current `poly_csp` runtime
+- plus explicit-solvent setup and trajectory-analysis tools
+- with minimal version drift between the two projects
+
+This should make it easy to:
+
+- validate `poly_csp` dry handoffs in the new environment
+- share small utilities across projects
+- reproduce bugs consistently across builder and simulator workflows
+
+
 ## Core Design Rule
 
 The new project must treat `poly_csp` outputs as the chemical and topological source of truth.
