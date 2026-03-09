@@ -1,0 +1,6 @@
+enabled: false
+n_cells: 3
+relax_enabled: true
+interior_positional_k: 1000.0
+terminal_positional_k: 250.0
+box_padding_A: 30.0

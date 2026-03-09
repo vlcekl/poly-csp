@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import numpy as np
 from rdkit import Chem
@@ -11,6 +11,7 @@ import openmm as mm
 from openmm import unit
 
 from poly_csp.forcefield.restraints import (
+    add_explicit_positional_restraints,
     add_dihedral_restraints,
     add_hbond_distance_restraints,
     add_positional_restraints,
@@ -42,12 +43,22 @@ class TwoStageMinimizationProtocol:
 
 
 @dataclass(frozen=True)
+class ExplicitPositionalRestraintGroup:
+    atom_indices: tuple[int, ...]
+    reference_positions_A: tuple[tuple[float, float, float], ...]
+    k_kj_per_mol_nm2: float
+    parameter_name: str
+    label: str = "explicit"
+
+
+@dataclass(frozen=True)
 class PreparedRuntimeOptimizationBundle:
     soft: SystemBuildResult
     full: SystemBuildResult
     reference_positions_nm: unit.Quantity
     restraint_spec: RuntimeRestraintSpec
     protocol: TwoStageMinimizationProtocol
+    extra_positional_restraints: tuple[ExplicitPositionalRestraintGroup, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,6 +200,8 @@ def prepare_system_for_minimization(
     restraint_spec: RuntimeRestraintSpec,
     selector: SelectorTemplate | None,
     reference_positions_nm: unit.Quantity,
+    *,
+    extra_positional_restraints: Sequence[ExplicitPositionalRestraintGroup] = (),
 ) -> None:
     backbone_heavy = backbone_heavy_indices(mol)
     if restraint_spec.freeze_backbone:
@@ -214,6 +227,28 @@ def prepare_system_for_minimization(
             pairs=hbond_pairs(mol, selector),
             k_kj_per_mol_nm2=float(restraint_spec.hbond_k),
         )
+    seen_parameter_names: set[str] = set()
+    for group in extra_positional_restraints:
+        if group.parameter_name in seen_parameter_names:
+            raise ValueError(
+                "Duplicate explicit positional restraint parameter name "
+                f"{group.parameter_name!r}."
+            )
+        seen_parameter_names.add(group.parameter_name)
+        if len(group.atom_indices) != len(group.reference_positions_A):
+            raise ValueError(
+                "Explicit positional restraint group "
+                f"{group.label!r} has mismatched atom/reference counts."
+            )
+        if not group.atom_indices or float(group.k_kj_per_mol_nm2) <= 0.0:
+            continue
+        add_explicit_positional_restraints(
+            system=system,
+            atom_indices=group.atom_indices,
+            reference_positions_A=group.reference_positions_A,
+            k_kj_per_mol_nm2=float(group.k_kj_per_mol_nm2),
+            parameter_name=group.parameter_name,
+        )
 
 
 def prepare_runtime_optimization_bundle(
@@ -224,9 +259,11 @@ def prepare_runtime_optimization_bundle(
     mixing_rules_cfg: Mapping[str, object] | None,
     restraint_spec: RuntimeRestraintSpec,
     protocol: TwoStageMinimizationProtocol,
+    extra_positional_restraints: Sequence[ExplicitPositionalRestraintGroup] = (),
     soft_repulsion_k_kj_per_mol_nm2: float = 800.0,
     soft_repulsion_cutoff_nm: float = 0.6,
 ) -> PreparedRuntimeOptimizationBundle:
+    resolved_extra_restraints = tuple(extra_positional_restraints)
     reference_positions_nm = positions_nm_from_mol(mol)
     soft = create_system(
         mol,
@@ -245,6 +282,7 @@ def prepare_runtime_optimization_bundle(
         restraint_spec=restraint_spec,
         selector=selector,
         reference_positions_nm=reference_positions_nm,
+        extra_positional_restraints=resolved_extra_restraints,
     )
     full = create_system(
         mol,
@@ -261,6 +299,7 @@ def prepare_runtime_optimization_bundle(
         restraint_spec=restraint_spec,
         selector=selector,
         reference_positions_nm=reference_positions_nm,
+        extra_positional_restraints=resolved_extra_restraints,
     )
     return PreparedRuntimeOptimizationBundle(
         soft=soft,
@@ -268,6 +307,7 @@ def prepare_runtime_optimization_bundle(
         reference_positions_nm=reference_positions_nm,
         restraint_spec=restraint_spec,
         protocol=protocol,
+        extra_positional_restraints=resolved_extra_restraints,
     )
 
 
@@ -286,6 +326,11 @@ def run_prepared_runtime_optimization(
         ),
         restraint_spec=bundle.restraint_spec,
         protocol=bundle.protocol,
+        extra_parameter_bases=tuple(
+            (group.parameter_name, float(group.k_kj_per_mol_nm2))
+            for group in bundle.extra_positional_restraints
+            if group.atom_indices and float(group.k_kj_per_mol_nm2) > 0.0
+        ),
     )
 
 
@@ -336,12 +381,15 @@ def _run_minimization_schedule(
     hbond_k: float,
     max_iterations: int,
     factors: np.ndarray,
+    extra_parameter_bases: Sequence[tuple[str, float]] = (),
 ) -> list[float]:
     energies: list[float] = []
     for factor in factors:
         set_optional_parameter(context, "k_pos", float(positional_k) * float(factor))
         set_optional_parameter(context, "k_tors", float(dihedral_k) * float(factor))
         set_optional_parameter(context, "k_hb", float(hbond_k) * float(factor))
+        for parameter_name, base_k in extra_parameter_bases:
+            set_optional_parameter(context, parameter_name, float(base_k) * float(factor))
         mm.LocalEnergyMinimizer.minimize(
             context,
             tolerance=10.0,
@@ -358,6 +406,7 @@ def run_two_stage_minimization(
     initial_positions_nm: unit.Quantity,
     restraint_spec: RuntimeRestraintSpec,
     protocol: TwoStageMinimizationProtocol,
+    extra_parameter_bases: Sequence[tuple[str, float]] = (),
 ) -> TwoStageMinimizationResult:
     n_stages = max(1, int(protocol.soft_n_stages))
     stage_factors = np.linspace(1.0, float(protocol.final_restraint_factor), n_stages)
@@ -370,6 +419,7 @@ def run_two_stage_minimization(
         hbond_k=float(restraint_spec.hbond_k),
         max_iterations=int(protocol.soft_max_iterations),
         factors=stage_factors,
+        extra_parameter_bases=extra_parameter_bases,
     )
     stage1_positions = soft_context.getState(getPositions=True).getPositions(asNumpy=True)
     del soft_context, soft_integrator
@@ -391,6 +441,12 @@ def run_two_stage_minimization(
         "k_hb",
         float(restraint_spec.hbond_k) * final_factor,
     )
+    for parameter_name, base_k in extra_parameter_bases:
+        set_optional_parameter(
+            full_context,
+            parameter_name,
+            float(base_k) * final_factor,
+        )
     mm.LocalEnergyMinimizer.minimize(
         full_context,
         tolerance=10.0,

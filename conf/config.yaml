@@ -7,6 +7,7 @@ defaults:
   - forcefield: mixing_rules
   - qc: basic
   - multi_opt: default
+  - periodic_handoff: default
   - _self_
 
 output:

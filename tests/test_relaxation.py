@@ -9,12 +9,15 @@ from openmm import unit
 
 from poly_csp.config.schema import HelixSpec
 from poly_csp.forcefield.minimization import (
+    ExplicitPositionalRestraintGroup,
     HELIX_CORE_BACKBONE_ATOM_NAMES,
     PreparedRuntimeOptimizationBundle,
     RuntimeRestraintSpec,
     TwoStageMinimizationProtocol,
     TwoStageMinimizationResult,
     helix_core_backbone_heavy_indices,
+    positions_nm_from_mol,
+    prepare_system_for_minimization,
 )
 from poly_csp.forcefield.model import build_forcefield_molecule
 from poly_csp.forcefield.relaxation import RelaxSpec, run_staged_relaxation
@@ -229,3 +232,46 @@ def test_helix_core_backbone_heavy_indices_exclude_exocyclic_site_atoms() -> Non
     assert "O2" not in atom_names
     assert "O3" not in atom_names
     assert "O6" not in atom_names
+
+
+def test_prepare_system_for_minimization_adds_explicit_reference_restraints() -> None:
+    mol, _ = _forcefield_selector_mol()
+    system = mm.System()
+    for _ in mol.GetAtoms():
+        system.addParticle(12.0)
+
+    xyz = np.asarray(mol.GetConformer(0).GetPositions(), dtype=float).reshape((-1, 3))
+    group = ExplicitPositionalRestraintGroup(
+        atom_indices=(0, 1),
+        reference_positions_A=(
+            tuple(float(v) for v in xyz[0]),
+            tuple(float(v) for v in xyz[1]),
+        ),
+        k_kj_per_mol_nm2=123.0,
+        parameter_name="k_pos_ref_test",
+        label="test_group",
+    )
+
+    prepare_system_for_minimization(
+        system=system,
+        mol=mol,
+        restraint_spec=RuntimeRestraintSpec(
+            positional_k=0.0,
+            dihedral_k=0.0,
+            hbond_k=0.0,
+            freeze_backbone=False,
+        ),
+        selector=None,
+        reference_positions_nm=positions_nm_from_mol(mol),
+        extra_positional_restraints=(group,),
+    )
+
+    external_forces = [
+        system.getForce(force_idx)
+        for force_idx in range(system.getNumForces())
+        if isinstance(system.getForce(force_idx), mm.CustomExternalForce)
+    ]
+    assert len(external_forces) == 1
+    force = external_forces[0]
+    assert force.getGlobalParameterName(0) == "k_pos_ref_test"
+    assert force.getNumParticles() == 2

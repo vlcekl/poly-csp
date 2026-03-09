@@ -167,6 +167,59 @@ def test_pipeline_runtime_multi_opt_writes_ranked_export_bundles(tmp_path: Path)
         assert (rank_dir / "model.inpcrd").exists()
 
 
+@pytest.mark.skipif(
+    any(shutil.which(tool) is None for tool in ("antechamber", "parmchk2", "tleap")),
+    reason="AmberTools fragment tools are not available",
+)
+@pytest.mark.skipif(
+    os.environ.get("POLYCSP_RUN_SLOW") != "1",
+    reason="set POLYCSP_RUN_SLOW=1 to run selector-bearing runtime integration",
+)
+def test_pipeline_periodic_multi_opt_handoff_writes_ranked_export_bundles(
+    tmp_path: Path,
+) -> None:
+    outdir = tmp_path / "periodic_multi_opt_handoff_exports"
+    _run_build(
+        "topology/backbone=amylose_periodic "
+        "topology.selector.enabled=true "
+        "topology.selector.sites=[C6] "
+        "forcefield/options=runtime "
+        "ordering.enabled=true "
+        "ordering.max_candidates=4 "
+        "ordering.soft_n_stages=1 "
+        "ordering.soft_max_iterations=5 "
+        "ordering.full_max_iterations=5 "
+        "multi_opt.enabled=true "
+        "multi_opt.n_starts=2 "
+        "multi_opt.top_k=2 "
+        "multi_opt.n_workers=1 "
+        "multi_opt.seed=7 "
+        "periodic_handoff.enabled=true "
+        "periodic_handoff.relax_enabled=false "
+        "output.export_formats=[pdb,pdbqt,amber] "
+        f"output.dir={outdir}"
+    )
+
+    ranking = json.loads((outdir / "ranking_summary.json").read_text(encoding="utf-8"))
+    assert ranking["n_starts"] == 2
+    assert ranking["n_ranked"] == 2
+
+    rank1 = outdir / "ranked_001"
+    rank2 = outdir / "ranked_002"
+    for rank_dir in (rank1, rank2):
+        report = json.loads((rank_dir / "build_report.json").read_text(encoding="utf-8"))
+        assert report["output_end_mode"] == "open"
+        assert report["periodic_handoff_enabled"] is True
+        assert report["periodic_handoff_primary_output"] is True
+        assert report["handoff_end_mode"] == "open"
+        assert (rank_dir / "model.pdb").exists()
+        assert (rank_dir / "receptor.pdbqt").exists()
+        assert (rank_dir / "model.prmtop").exists()
+        assert (rank_dir / "model.inpcrd").exists()
+        assert (rank_dir / "periodic_cell" / "model.pdb").exists()
+        assert (rank_dir / "periodic_cell" / "build_report.json").exists()
+
+
 def test_pipeline_runtime_supports_periodic_mode(tmp_path: Path) -> None:
     outdir = tmp_path / "periodic_runtime"
     _run_build(
@@ -186,6 +239,39 @@ def test_pipeline_runtime_supports_periodic_mode(tmp_path: Path) -> None:
     assert report["qc_periodic_closure_metrics"]["bond_length_A"] < 2.0
     assert report["amber_enabled"] is False
     assert report["docking_enabled"] is False
+
+
+def test_pipeline_periodic_handoff_exports_open_docking_bundle(tmp_path: Path) -> None:
+    outdir = tmp_path / "periodic_handoff_exports"
+    _run_build(
+        "topology/backbone=amylose_periodic "
+        "topology.selector.enabled=false "
+        "forcefield/options=runtime "
+        "periodic_handoff.enabled=true "
+        "periodic_handoff.relax_enabled=false "
+        "output.export_formats=[pdb,pdbqt,amber] "
+        f"output.dir={outdir}"
+    )
+
+    report = json.loads((outdir / "build_report.json").read_text(encoding="utf-8"))
+    assert report["end_mode"] == "periodic"
+    assert report["output_end_mode"] == "open"
+    assert report["periodic_handoff_enabled"] is True
+    assert report["periodic_handoff_primary_output"] is True
+    assert report["optimization_end_mode"] == "periodic"
+    assert report["handoff_end_mode"] == "open"
+    assert report["periodic_unit_cell_dp"] == 4
+    assert report["periodic_n_cells"] == 3
+    assert report["handoff_dp"] == 12
+    assert report["handoff_relaxation_enabled"] is False
+    assert report["amber_enabled"] is True
+    assert report["docking_enabled"] is True
+    assert (outdir / "model.pdb").exists()
+    assert (outdir / "receptor.pdbqt").exists()
+    assert (outdir / "model.prmtop").exists()
+    assert (outdir / "model.inpcrd").exists()
+    assert (outdir / "periodic_cell" / "model.pdb").exists()
+    assert (outdir / "periodic_cell" / "build_report.json").exists()
 
 
 def test_pipeline_runtime_rejects_periodic_pdbqt_export(tmp_path: Path) -> None:

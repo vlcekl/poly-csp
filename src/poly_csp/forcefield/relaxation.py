@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Sequence
 
 import numpy as np
 from rdkit import Chem
@@ -12,6 +12,7 @@ from openmm import unit
 
 from poly_csp.forcefield.anneal import run_heat_cool_cycle, run_temperature_ramp
 from poly_csp.forcefield.minimization import (
+    ExplicitPositionalRestraintGroup,
     HELIX_CORE_BACKBONE_ATOM_NAMES,
     PreparedRuntimeOptimizationBundle,
     RuntimeRestraintSpec,
@@ -110,6 +111,7 @@ def _prepare_relaxation_bundle(
     mixing_rules_cfg: Mapping[str, object] | None,
     soft_repulsion_k_kj_per_mol_nm2: float,
     soft_repulsion_cutoff_nm: float,
+    extra_positional_restraints: Sequence[ExplicitPositionalRestraintGroup] = (),
 ) -> PreparedRuntimeOptimizationBundle:
     return prepare_runtime_optimization_bundle(
         mol,
@@ -118,6 +120,7 @@ def _prepare_relaxation_bundle(
         mixing_rules_cfg=mixing_rules_cfg,
         restraint_spec=_relaxation_restraint_spec(spec),
         protocol=_relaxation_protocol(spec),
+        extra_positional_restraints=extra_positional_restraints,
         soft_repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
         soft_repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
     )
@@ -133,6 +136,7 @@ def run_staged_relaxation(
     soft_repulsion_k_kj_per_mol_nm2: float = 800.0,
     soft_repulsion_cutoff_nm: float = 0.6,
     mixing_rules_cfg: Mapping[str, object] | None = None,
+    extra_positional_restraints: Sequence[ExplicitPositionalRestraintGroup] = (),
 ) -> tuple[Chem.Mol, Dict[str, object]]:
     """Run the canonical two-stage runtime relaxation on a forcefield-domain molecule."""
     if not spec.enabled:
@@ -155,6 +159,7 @@ def run_staged_relaxation(
         mixing_rules_cfg=mixing_rules_cfg,
         soft_repulsion_k_kj_per_mol_nm2=float(soft_repulsion_k_kj_per_mol_nm2),
         soft_repulsion_cutoff_nm=float(soft_repulsion_cutoff_nm),
+        extra_positional_restraints=extra_positional_restraints,
     )
     minimization = run_prepared_runtime_optimization(bundle)
     stage2_energies = list(minimization.stage2_energies_kj_mol)
@@ -181,6 +186,12 @@ def run_staged_relaxation(
             "k_hb",
             float(bundle.restraint_spec.hbond_k) * final_factor,
         )
+        for group in bundle.extra_positional_restraints:
+            set_optional_parameter(
+                full_context,
+                group.parameter_name,
+                float(group.k_kj_per_mol_nm2) * final_factor,
+            )
         _apply_stage2_anneal(full_context, full_integrator, spec)
         mm.LocalEnergyMinimizer.minimize(
             full_context,
@@ -249,5 +260,15 @@ def run_staged_relaxation(
         "source_manifest": dict(bundle.full.source_manifest),
         "span_A": [float(value) for value in span.tolist()],
         "backbone_drift_A": float(backbone_drift),
+        "explicit_positional_restraint_groups": [
+            {
+                "label": str(group.label),
+                "parameter_name": str(group.parameter_name),
+                "k_kj_per_mol_nm2": float(group.k_kj_per_mol_nm2),
+                "n_atoms": len(group.atom_indices),
+            }
+            for group in bundle.extra_positional_restraints
+            if group.atom_indices and float(group.k_kj_per_mol_nm2) > 0.0
+        ],
     }
     return out, summary

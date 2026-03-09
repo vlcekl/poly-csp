@@ -27,6 +27,44 @@ def add_positional_restraints(
     return force
 
 
+def add_explicit_positional_restraints(
+    system: mm.System,
+    atom_indices: Sequence[int],
+    reference_positions_A: Sequence[Sequence[float]],
+    k_kj_per_mol_nm2: float,
+    *,
+    parameter_name: str,
+) -> mm.CustomExternalForce:
+    ref_A = np.asarray(reference_positions_A, dtype=float)
+    if ref_A.ndim != 2 or ref_A.shape[1] != 3:
+        raise ValueError(
+            "Explicit positional restraint references must have shape (N, 3)."
+        )
+    if ref_A.shape[0] != len(atom_indices):
+        raise ValueError(
+            "Explicit positional restraint atom/reference count mismatch: "
+            f"{len(atom_indices)} atoms vs {ref_A.shape[0]} reference positions."
+        )
+    if not parameter_name or not parameter_name.replace("_", "").isalnum():
+        raise ValueError(
+            f"Explicit positional restraint parameter_name {parameter_name!r} is invalid."
+        )
+
+    force = mm.CustomExternalForce(
+        f"0.5*{parameter_name}*((x-x0)^2+(y-y0)^2+(z-z0)^2)"
+    )
+    force.addGlobalParameter(parameter_name, float(k_kj_per_mol_nm2))
+    force.addPerParticleParameter("x0")
+    force.addPerParticleParameter("y0")
+    force.addPerParticleParameter("z0")
+
+    ref_nm = ref_A / 10.0
+    for idx, (x0, y0, z0) in zip(atom_indices, ref_nm, strict=True):
+        force.addParticle(int(idx), [float(x0), float(y0), float(z0)])
+    system.addForce(force)
+    return force
+
+
 def add_dihedral_restraints(
     system: mm.System,
     dihedrals: Sequence[tuple[int, int, int, int, float]],
