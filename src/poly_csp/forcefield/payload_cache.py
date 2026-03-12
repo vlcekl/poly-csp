@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import lru_cache
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
 PAYLOAD_CACHE_SCHEMA_VERSION = 3
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_CACHE_DIR = _REPO_ROOT / ".cache" / "poly_csp" / "runtime_params"
+_SEEDED_SELECTOR_PAYLOAD_CATALOG = "selectors.json"
+_SEEDED_CONNECTOR_PAYLOAD_CATALOG = "connectors.json"
 
 
 def resolve_runtime_cache_dir(cache_dir: str | Path | None = None) -> Path:
@@ -50,6 +54,34 @@ def resolve_runtime_cache_dir(cache_dir: str | Path | None = None) -> Path:
     if path.is_absolute():
         return path
     return (_REPO_ROOT / path).resolve()
+
+
+@lru_cache(maxsize=None)
+def _load_seed_catalog(
+    asset_name: str,
+    *,
+    expected_kind: str,
+) -> dict[str, dict[str, Any]]:
+    root = files("poly_csp.assets.runtime_params")
+    ref = root / asset_name
+    if not ref.is_file():
+        return {}
+    with as_file(ref) as asset_path:
+        payload = json.loads(asset_path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != PAYLOAD_CACHE_SCHEMA_VERSION:
+        return {}
+    if payload.get("payload_kind") != expected_kind:
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        raise TypeError(
+            f"Seeded runtime payload catalog {asset_name!r} did not contain a mapping of entries."
+        )
+    return {
+        str(key): dict(entry)
+        for key, entry in entries.items()
+        if isinstance(entry, dict)
+    }
 
 
 def _canonical_smiles(mol: Chem.Mol) -> str:
@@ -84,7 +116,9 @@ def selector_cache_identity(
         "linkage_type": str(selector_template.linkage_type),
         "connector_local_roles": {
             str(int(local_idx)): str(role)
-            for local_idx, role in sorted(selector_template.connector_local_roles.items())
+            for local_idx, role in sorted(
+                selector_template.connector_local_roles.items()
+            )
         },
         "charge_model": str(charge_model),
         "net_charge": int(net_charge),
@@ -136,6 +170,32 @@ def selector_cache_dir(
     return root / "selector" / str(selector_template.name).lower() / key, identity
 
 
+def load_seeded_selector_params(
+    selector_template: SelectorTemplate,
+    *,
+    charge_model: str = "bcc",
+    net_charge: int = 0,
+) -> tuple[SelectorFragmentParams, str] | None:
+    key, identity = selector_cache_identity(
+        selector_template,
+        charge_model=charge_model,
+        net_charge=net_charge,
+    )
+    entry = _load_seed_catalog(
+        _SEEDED_SELECTOR_PAYLOAD_CATALOG,
+        expected_kind="selector_fragment_seed_catalog",
+    ).get(key)
+    if entry is None or dict(entry.get("identity", {})) != identity:
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return (
+        _selector_params_from_jsonable(dict(payload)),
+        f"poly_csp.assets.runtime_params:{_SEEDED_SELECTOR_PAYLOAD_CATALOG}#{key}",
+    )
+
+
 def connector_cache_dir(
     cache_root: str | Path | None,
     polymer: PolymerKind,
@@ -156,8 +216,44 @@ def connector_cache_dir(
     )
     root = resolve_runtime_cache_dir(cache_root)
     return (
-        root / "connector" / str(selector_template.name).lower() / str(site).lower() / key,
+        root
+        / "connector"
+        / str(selector_template.name).lower()
+        / str(site).lower()
+        / key,
         identity,
+    )
+
+
+def load_seeded_connector_params(
+    polymer: PolymerKind,
+    selector_template: SelectorTemplate,
+    site: Site,
+    *,
+    monomer_representation: MonomerRepresentation = "natural_oh",
+    charge_model: str = "bcc",
+    net_charge: int = 0,
+) -> tuple[ConnectorParams, str] | None:
+    key, identity = connector_cache_identity(
+        polymer,
+        selector_template,
+        site,
+        monomer_representation=monomer_representation,
+        charge_model=charge_model,
+        net_charge=net_charge,
+    )
+    entry = _load_seed_catalog(
+        _SEEDED_CONNECTOR_PAYLOAD_CATALOG,
+        expected_kind="connector_fragment_seed_catalog",
+    ).get(key)
+    if entry is None or dict(entry.get("identity", {})) != identity:
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return (
+        _connector_params_from_jsonable(dict(payload)),
+        f"poly_csp.assets.runtime_params:{_SEEDED_CONNECTOR_PAYLOAD_CATALOG}#{key}",
     )
 
 
@@ -308,7 +404,9 @@ def _connector_params_to_jsonable(params: ConnectorParams) -> dict[str, Any]:
         "linkage_type": params.linkage_type,
         "source_prmtop": params.source_prmtop,
         "fragment_atom_count": params.fragment_atom_count,
-        "connector_role_atom_names": dict(sorted(params.connector_role_atom_names.items())),
+        "connector_role_atom_names": dict(
+            sorted(params.connector_role_atom_names.items())
+        ),
         "atom_params": {
             name: {
                 "atom_name": atom.atom_name,
@@ -336,7 +434,9 @@ def _connector_params_to_jsonable(params: ConnectorParams) -> dict[str, Any]:
         ],
         "torsions": [
             {
-                "atoms": [_connector_token_to_jsonable(token) for token in torsion.atoms],
+                "atoms": [
+                    _connector_token_to_jsonable(token) for token in torsion.atoms
+                ],
                 "periodicity": torsion.periodicity,
                 "phase_rad": torsion.phase_rad,
                 "k_kj_per_mol": torsion.k_kj_per_mol,
@@ -350,7 +450,9 @@ def _connector_params_from_jsonable(data: dict[str, Any]) -> ConnectorParams:
     return ConnectorParams(
         polymer=str(data["polymer"]) if data.get("polymer") is not None else None,
         selector_name=(
-            str(data["selector_name"]) if data.get("selector_name") is not None else None
+            str(data["selector_name"])
+            if data.get("selector_name") is not None
+            else None
         ),
         site=str(data["site"]) if data.get("site") is not None else None,
         monomer_representation=(
@@ -359,9 +461,7 @@ def _connector_params_from_jsonable(data: dict[str, Any]) -> ConnectorParams:
             else None
         ),
         linkage_type=(
-            str(data["linkage_type"])
-            if data.get("linkage_type") is not None
-            else None
+            str(data["linkage_type"]) if data.get("linkage_type") is not None else None
         ),
         atom_params={
             str(name): ConnectorAtomParams(
@@ -374,7 +474,9 @@ def _connector_params_from_jsonable(data: dict[str, Any]) -> ConnectorParams:
         },
         connector_role_atom_names={
             str(role_name): str(atom_name)
-            for role_name, atom_name in dict(data.get("connector_role_atom_names", {})).items()
+            for role_name, atom_name in dict(
+                data.get("connector_role_atom_names", {})
+            ).items()
         },
         bonds=tuple(
             ConnectorBondTemplate(
@@ -469,8 +571,7 @@ def _glycam_bond_from_jsonable(data: dict[str, Any]) -> "GlycamBondTemplate":
 
     return GlycamBondTemplate(
         atoms=tuple(
-            _glycam_atom_token_from_jsonable(token)
-            for token in list(data["atoms"])
+            _glycam_atom_token_from_jsonable(token) for token in list(data["atoms"])
         ),  # type: ignore[arg-type]
         length_nm=float(data["length_nm"]),
         k_kj_per_mol_nm2=float(data["k_kj_per_mol_nm2"]),
@@ -482,8 +583,7 @@ def _glycam_angle_from_jsonable(data: dict[str, Any]) -> "GlycamAngleTemplate":
 
     return GlycamAngleTemplate(
         atoms=tuple(
-            _glycam_atom_token_from_jsonable(token)
-            for token in list(data["atoms"])
+            _glycam_atom_token_from_jsonable(token) for token in list(data["atoms"])
         ),  # type: ignore[arg-type]
         theta0_rad=float(data["theta0_rad"]),
         k_kj_per_mol_rad2=float(data["k_kj_per_mol_rad2"]),
@@ -495,8 +595,7 @@ def _glycam_torsion_from_jsonable(data: dict[str, Any]) -> "GlycamTorsionTemplat
 
     return GlycamTorsionTemplate(
         atoms=tuple(
-            _glycam_atom_token_from_jsonable(token)
-            for token in list(data["atoms"])
+            _glycam_atom_token_from_jsonable(token) for token in list(data["atoms"])
         ),  # type: ignore[arg-type]
         periodicity=int(data["periodicity"]),
         phase_rad=float(data["phase_rad"]),
@@ -519,7 +618,9 @@ def _glycam_params_to_jsonable(params: "GlycamParams") -> dict[str, Any]:
                 "residue_name": atom_params.residue_name,
                 "source_atom_name": atom_params.source_atom_name,
             }
-            for (residue_role, atom_name), atom_params in sorted(params.atom_params.items())
+            for (residue_role, atom_name), atom_params in sorted(
+                params.atom_params.items()
+            )
         ],
         "residue_templates": [
             {
@@ -527,9 +628,12 @@ def _glycam_params_to_jsonable(params: "GlycamParams") -> dict[str, Any]:
                 "residue_name": template.residue_name,
                 "atom_names": list(template.atom_names),
                 "bonds": [_glycam_bond_to_jsonable(bond) for bond in template.bonds],
-                "angles": [_glycam_angle_to_jsonable(angle) for angle in template.angles],
+                "angles": [
+                    _glycam_angle_to_jsonable(angle) for angle in template.angles
+                ],
                 "torsions": [
-                    _glycam_torsion_to_jsonable(torsion) for torsion in template.torsions
+                    _glycam_torsion_to_jsonable(torsion)
+                    for torsion in template.torsions
                 ],
             }
             for residue_role, template in sorted(params.residue_templates.items())
@@ -538,9 +642,12 @@ def _glycam_params_to_jsonable(params: "GlycamParams") -> dict[str, Any]:
             {
                 "residue_roles": list(residue_roles),
                 "bonds": [_glycam_bond_to_jsonable(bond) for bond in template.bonds],
-                "angles": [_glycam_angle_to_jsonable(angle) for angle in template.angles],
+                "angles": [
+                    _glycam_angle_to_jsonable(angle) for angle in template.angles
+                ],
                 "torsions": [
-                    _glycam_torsion_to_jsonable(torsion) for torsion in template.torsions
+                    _glycam_torsion_to_jsonable(torsion)
+                    for torsion in template.torsions
                 ],
             }
             for residue_roles, template in sorted(params.linkage_templates.items())
@@ -564,12 +671,10 @@ def _glycam_params_from_jsonable(data: dict[str, Any]) -> "GlycamParams":
             residue_name=str(entry["residue_name"]),
             atom_names=tuple(str(name) for name in entry["atom_names"]),
             bonds=tuple(
-                _glycam_bond_from_jsonable(bond)
-                for bond in list(entry["bonds"])
+                _glycam_bond_from_jsonable(bond) for bond in list(entry["bonds"])
             ),
             angles=tuple(
-                _glycam_angle_from_jsonable(angle)
-                for angle in list(entry["angles"])
+                _glycam_angle_from_jsonable(angle) for angle in list(entry["angles"])
             ),
             torsions=tuple(
                 _glycam_torsion_from_jsonable(torsion)
@@ -584,12 +689,10 @@ def _glycam_params_from_jsonable(data: dict[str, Any]) -> "GlycamParams":
                 str(role) for role in entry["residue_roles"]
             ),  # type: ignore[arg-type]
             bonds=tuple(
-                _glycam_bond_from_jsonable(bond)
-                for bond in list(entry["bonds"])
+                _glycam_bond_from_jsonable(bond) for bond in list(entry["bonds"])
             ),
             angles=tuple(
-                _glycam_angle_from_jsonable(angle)
-                for angle in list(entry["angles"])
+                _glycam_angle_from_jsonable(angle) for angle in list(entry["angles"])
             ),
             torsions=tuple(
                 _glycam_torsion_from_jsonable(torsion)

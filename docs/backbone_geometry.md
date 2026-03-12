@@ -1,6 +1,6 @@
 # Backbone Geometry Notes
 
-This note documents the current local geometry rules enforced by the canonical backbone builder in [src/poly_csp/structure/backbone_builder.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/backbone_builder.py).
+This note documents the current local geometry rules enforced by the canonical backbone builder in [src/poly_csp/structure/backbone_builder.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/structure/backbone_builder.py).
 
 ## Geometry Derivation Rule
 

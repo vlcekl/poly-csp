@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from tests.support import build_backbone_coords
 from poly_csp.config.schema import HelixSpec
+import poly_csp.structure.backbone_builder as backbone_builder_mod
 from poly_csp.structure.matrix import ScrewTransform
 from poly_csp.topology.monomers import make_glucose_template
 
@@ -101,3 +102,28 @@ def test_derivatized_cellulose_preset_normalizes_expected_geometry() -> None:
     assert helix.rise_A == pytest.approx(5.4)
     assert helix.axial_repeat_A == pytest.approx(16.2)
     assert helix.pitch_A == pytest.approx(8.1)
+
+
+def test_backbone_pose_disk_cache_reuses_saved_pose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template = make_glucose_template("amylose")
+    helix = _test_helix()
+    cache_dir = tmp_path / "backbone_pose_cache"
+
+    monkeypatch.setattr(backbone_builder_mod, "_BACKBONE_POSE_CACHE_DIR", cache_dir)
+    backbone_builder_mod._BACKBONE_POSE_CACHE.clear()
+
+    coords_first = backbone_builder_mod.build_backbone_heavy_coords(template, helix, 6)
+    assert list(cache_dir.rglob("pose.json"))
+
+    backbone_builder_mod._BACKBONE_POSE_CACHE.clear()
+
+    def _raise_if_recomputed():
+        raise AssertionError("Backbone pose should have been loaded from disk cache.")
+
+    monkeypatch.setattr(backbone_builder_mod, "_candidate_backbone_poses", _raise_if_recomputed)
+    coords_second = backbone_builder_mod.build_backbone_heavy_coords(template, helix, 6)
+
+    assert np.allclose(coords_first, coords_second)

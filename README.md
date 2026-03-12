@@ -187,11 +187,14 @@ poly_csp/
 │   │   └── mixing_rules.yaml
 │   ├── ordering/
 │   ├── multi_opt/
+│   ├── periodic_handoff/
 │   └── qc/
 │
 └── src/
     └── poly_csp/
         ├── __init__.py
+        ├── assets/
+        │   └── selectors/
         ├── config/
         │   ├── schema.py
         │   └── presets.py
@@ -202,6 +205,7 @@ poly_csp/
         │   ├── reactions.py
         │   ├── atom_mapping.py
         │   ├── residue_state.py
+        │   ├── selector_assets.py
         │   └── selectors.py
         │
         ├── structure/        # Deterministic all-atom geometry handoff
@@ -244,7 +248,8 @@ poly_csp/
 
 Runtime source of truth:
 - Build-time defaults and behavior are controlled by Hydra YAML in `conf/`.
-- `src/poly_csp/config/presets.py` is reference/experimental and not the active runtime default path.
+- Packaged selector chemistry is controlled by YAML assets in `src/poly_csp/assets/selectors/`.
+- `src/poly_csp/config/presets.py` is reference-only and not the active runtime default path.
 
 ---
 
@@ -316,6 +321,8 @@ conf/
 ├── ordering/
 │   └── basic.yaml
 ├── multi_opt/
+│   └── default.yaml
+├── periodic_handoff/
 │   └── default.yaml
 └── qc/
     └── basic.yaml
@@ -492,7 +499,13 @@ The build report now records:
   * `force_inventory`
   * nonbonded exclusions/exceptions
   * true 1-4 exception counts by rule bucket and fine pair class
-* runtime parameter cache hits/misses and per-source provenance
+* runtime parameter cache hits/seeded hits/build misses and per-source provenance
+
+For the bundled selector catalog, selector and connector runtime payloads also ship as
+read-only seed assets. With `forcefield.options.cache_enabled=true`, the runtime loader
+checks the writable cache first, then the packaged seed catalog, and only falls back to
+AmberTools fragment derivation on a real miss. Seed hits are reported separately from
+writable-cache hits in `build_report.json`.
 
 The canonical runtime options are also typed and single-path. The only stage-specific nonbonded knobs currently exposed are:
 
@@ -827,8 +840,8 @@ When adding new selectors:
 
 When adding new helix presets:
 
-1. Define `HelixSpec` in `presets.py`.
-2. Add Hydra YAML in `/conf/structure/helix/`.
+1. Add Hydra YAML in `/conf/structure/helix/`; that is the runtime source of truth.
+2. Mirror the preset in `src/poly_csp/config/presets.py` only if you want a reference Python object for tests or exploratory code.
 
 When adding new phase presets:
 

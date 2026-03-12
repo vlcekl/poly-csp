@@ -26,7 +26,7 @@ dihedral application, atom mapping, and terminal/export stages.
   `O6`, etc.) to molecule-global atom indices after representation-specific edits.
 
 - `_poly_csp_siteidx_<label>`:
-  Local template site index hints (backward compatibility), e.g. `_poly_csp_siteidx_O6`.
+  Local template site index hints for fixed-site helpers, e.g. `_poly_csp_siteidx_O6`.
 
 - `_poly_csp_end_mode`:
   Terminal policy mode (`open`, `capped`, `periodic`).

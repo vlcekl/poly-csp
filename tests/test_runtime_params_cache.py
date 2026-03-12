@@ -56,7 +56,9 @@ def _forcefield_selector_mol(site: str):
     return build_forcefield_molecule(structure).mol, selector
 
 
-def _selector_payload(selector_name: str, work_dir: str | Path | None) -> SelectorFragmentParams:
+def _selector_payload(
+    selector_name: str, work_dir: str | Path | None
+) -> SelectorFragmentParams:
     work_path = None if work_dir is None else Path(work_dir)
     return SelectorFragmentParams(
         selector_name=selector_name,
@@ -100,7 +102,9 @@ def _connector_payload(
         bonds=(),
         angles=(),
         torsions=(),
-        source_prmtop=None if work_path is None else str(work_path / f"connector_{site}.prmtop"),
+        source_prmtop=(
+            None if work_path is None else str(work_path / f"connector_{site}.prmtop")
+        ),
         fragment_atom_count=1,
     )
 
@@ -118,8 +122,18 @@ def test_load_runtime_params_reuses_selector_and_connector_cache(
         "poly_csp.forcefield.runtime_params.load_glycam_params",
         lambda **kwargs: glycam,
     )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_seeded_selector_params",
+        lambda selector_template: None,
+    )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_seeded_connector_params",
+        lambda **kwargs: None,
+    )
 
-    def fake_selector_loader(selector_template, charge_model="bcc", net_charge=0, work_dir=None):
+    def fake_selector_loader(
+        selector_template, charge_model="bcc", net_charge=0, work_dir=None
+    ):
         calls["selector"] += 1
         assert charge_model == "bcc"
         assert net_charge == 0
@@ -175,9 +189,15 @@ def test_load_runtime_params_reuses_selector_and_connector_cache(
     assert second.cache_summary.connector_hits == 1
     assert second.cache_summary.connector_misses == 0
     assert first.source_manifest["selector"][selector.name]["cache"]["hit"] is False
-    assert first.source_manifest["connector"][f"{selector.name}:C6"]["cache"]["hit"] is False
+    assert (
+        first.source_manifest["connector"][f"{selector.name}:C6"]["cache"]["hit"]
+        is False
+    )
     assert second.source_manifest["selector"][selector.name]["cache"]["hit"] is True
-    assert second.source_manifest["connector"][f"{selector.name}:C6"]["cache"]["hit"] is True
+    assert (
+        second.source_manifest["connector"][f"{selector.name}:C6"]["cache"]["hit"]
+        is True
+    )
 
     selector_entry, _ = selector_cache_dir(cache_dir, selector)
     connector_entry, _ = connector_cache_dir(
@@ -204,8 +224,18 @@ def test_load_runtime_params_invalidates_connector_cache_by_site(
         "poly_csp.forcefield.runtime_params.load_glycam_params",
         lambda **kwargs: SimpleNamespace(kind="glycam"),
     )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_seeded_selector_params",
+        lambda selector_template: None,
+    )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_seeded_connector_params",
+        lambda **kwargs: None,
+    )
 
-    def fake_selector_loader(selector_template, charge_model="bcc", net_charge=0, work_dir=None):
+    def fake_selector_loader(
+        selector_template, charge_model="bcc", net_charge=0, work_dir=None
+    ):
         calls["selector"] += 1
         return _selector_payload(selector_template.name, work_dir)
 
@@ -251,7 +281,81 @@ def test_load_runtime_params_invalidates_connector_cache_by_site(
     assert second.cache_summary.connector_hits == 0
     assert second.cache_summary.connector_misses == 1
     assert second.source_manifest["selector"][selector_c2.name]["cache"]["hit"] is True
-    assert second.source_manifest["connector"][f"{selector_c2.name}:C2"]["cache"]["hit"] is False
+    assert (
+        second.source_manifest["connector"][f"{selector_c2.name}:C2"]["cache"]["hit"]
+        is False
+    )
+
+
+def test_load_runtime_params_prefers_seeded_selector_and_connector_payloads(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    mol, selector = _forcefield_selector_mol("C6")
+    cache_dir = tmp_path / "runtime_cache"
+    glycam = SimpleNamespace(kind="glycam")
+
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_glycam_params",
+        lambda **kwargs: glycam,
+    )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_selector_fragment_params",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("selector build should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        "poly_csp.forcefield.runtime_params.load_connector_params",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("connector build should not run")
+        ),
+    )
+
+    seeded = load_runtime_params(
+        mol,
+        selector_template=selector,
+        cache_dir=cache_dir,
+    )
+    cached = load_runtime_params(
+        mol,
+        selector_template=selector,
+        cache_dir=cache_dir,
+    )
+
+    assert seeded.glycam is glycam
+    assert cached.glycam is glycam
+    assert seeded.cache_summary.selector_hits == 0
+    assert seeded.cache_summary.selector_seed_hits == 1
+    assert seeded.cache_summary.selector_misses == 0
+    assert seeded.cache_summary.connector_hits == 0
+    assert seeded.cache_summary.connector_seed_hits == 1
+    assert seeded.cache_summary.connector_misses == 0
+    assert seeded.source_manifest["selector"][selector.name]["cache"]["kind"] == "seed"
+    assert (
+        seeded.source_manifest["connector"][f"{selector.name}:C6"]["cache"]["kind"]
+        == "seed"
+    )
+    assert seeded.source_manifest["selector"][selector.name]["cache"]["seed_asset"]
+    assert seeded.source_manifest["connector"][f"{selector.name}:C6"]["cache"][
+        "seed_asset"
+    ]
+
+    assert cached.cache_summary.selector_hits == 1
+    assert cached.cache_summary.selector_seed_hits == 0
+    assert cached.cache_summary.connector_hits == 1
+    assert cached.cache_summary.connector_seed_hits == 0
+
+    selector_entry, _ = selector_cache_dir(cache_dir, selector)
+    connector_entry, _ = connector_cache_dir(
+        cache_dir,
+        polymer="amylose",
+        selector_template=selector,
+        site="C6",
+        monomer_representation="natural_oh",
+    )
+    assert (selector_entry / "payload.json").exists()
+    assert (connector_entry / "payload.json").exists()
 
 
 def test_connector_cache_dir_is_polymer_specific(tmp_path: Path) -> None:

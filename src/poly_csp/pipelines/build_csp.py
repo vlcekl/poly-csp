@@ -72,7 +72,7 @@ from poly_csp.ordering.scoring import (
 from poly_csp.ordering.optimize import OrderingSpec, optimize_selector_ordering
 from poly_csp.ordering.multi_opt import MultiOptSpec, run_multi_start_optimization
 
-# Optional selector imports (keep pipeline runnable even before selector is implemented).
+# Selector stack imports.
 try:
     from poly_csp.topology.selectors import SelectorRegistry, SelectorTemplate
     from poly_csp.topology.reactions import attach_selector

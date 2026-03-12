@@ -1,6 +1,6 @@
 # Hydrogen Handling in the Current Pipeline
 
-This document describes the current Phase 1 hydrogen model.
+This document describes the current hydrogen model.
 
 The boundary is now explicit:
 
@@ -18,7 +18,7 @@ The boundary is now explicit:
 
 ## Stage 1: Glucose monomer templates
 
-`make_glucose_template()` in [src/poly_csp/topology/monomers.py](/home/lukas/work/projects/poly_csp/src/poly_csp/topology/monomers.py) is still topology-domain code, so the stored template is heavy-atom only.
+`make_glucose_template()` in [src/poly_csp/topology/monomers.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/topology/monomers.py) is still topology-domain code, so the stored template is heavy-atom only.
 
 Important details:
 
@@ -45,7 +45,7 @@ At this stage:
 
 ## Stage 3: Explicit-H backbone templates
 
-Backbone hydrogens are introduced in the structure domain through [src/poly_csp/structure/templates.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/templates.py).
+Backbone hydrogens are introduced in the structure domain through [src/poly_csp/structure/templates.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/structure/templates.py).
 
 The flow is:
 
@@ -64,7 +64,7 @@ The geometry rule is the same as for monomers: build the full chemically complet
 
 ## Stage 4: Direct all-atom backbone construction
 
-`build_backbone_structure()` in [src/poly_csp/structure/backbone_builder.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/backbone_builder.py) is now the canonical backbone builder.
+`build_backbone_structure()` in [src/poly_csp/structure/backbone_builder.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/structure/backbone_builder.py) is now the canonical backbone builder.
 
 It does three things:
 
@@ -101,7 +101,7 @@ So selector attachment is no longer a heavy-atom-only chemistry edit followed by
 
 ## Stage 6: Forcefield-domain handoff
 
-`build_forcefield_molecule()` in [src/poly_csp/forcefield/model.py](/home/lukas/work/projects/poly_csp/src/poly_csp/forcefield/model.py) performs the structure-to-forcefield handoff.
+`build_forcefield_molecule()` in [src/poly_csp/forcefield/model.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/forcefield/model.py) performs the structure-to-forcefield handoff.
 
 It validates that:
 
@@ -113,11 +113,11 @@ It then builds the deterministic atom manifest and export naming. It must not al
 
 ## Where Generic Hydrogen Completion Still Exists
 
-`complete_with_hydrogens()` in [src/poly_csp/structure/hydrogens.py](/home/lukas/work/projects/poly_csp/src/poly_csp/structure/hydrogens.py) still exists, but it is no longer part of canonical backbone construction.
+`complete_with_hydrogens()` in [src/poly_csp/structure/hydrogens.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/structure/hydrogens.py) still exists, but it is no longer part of canonical backbone construction.
 
 Its remaining use is isolated fragment preparation, for example:
 
-- AmberTools / GAFF fragment setup in [src/poly_csp/forcefield/gaff.py](/home/lukas/work/projects/poly_csp/src/poly_csp/forcefield/gaff.py),
+- AmberTools / GAFF fragment setup in [src/poly_csp/forcefield/gaff.py](/home/lukas/work/projects/chiral_csp_poly/src/poly_csp/forcefield/gaff.py),
 - standalone hydrogen-completion utilities and tests.
 
 That distinction matters:

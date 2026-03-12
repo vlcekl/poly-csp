@@ -39,9 +39,9 @@ def test_helix_spec_derives_cellulose_csp_3_2_geometry() -> None:
     assert helix.axial_repeat_A == pytest.approx(16.2)
 
 
-def test_helix_spec_derives_axial_repeat_from_legacy_fields() -> None:
+def test_helix_spec_derives_axial_repeat_from_explicit_screw_fields() -> None:
     helix = HelixSpec(
-        name="legacy_low_level_amylose",
+        name="explicit_screw_amylose",
         theta_rad=-3.0 * math.pi / 2.0,
         rise_A=3.7,
         repeat_residues=4,

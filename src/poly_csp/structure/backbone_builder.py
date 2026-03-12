@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
+from pathlib import Path
 
 import numpy as np
 from rdkit import Chem
@@ -36,6 +39,9 @@ _POSE_RADIUS_BOUNDS = (0.8, 2.4)
 _POSE_TILT_BOUNDS = (-1.4, 1.4)
 _POSE_PHASE_BOUNDS = (-math.pi, math.pi)
 _PERIODIC_COMMENSURABILITY_TOL_RAD = 1e-4
+_BACKBONE_POSE_CACHE_SCHEMA_VERSION = 1
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_BACKBONE_POSE_CACHE_DIR = _REPO_ROOT / ".cache" / "poly_csp" / "backbone_pose"
 
 
 @dataclass(frozen=True)
@@ -624,6 +630,129 @@ def _refine_backbone_pose(
 _BACKBONE_POSE_CACHE: dict[tuple[str, str, float, float], BackbonePose] = {}
 
 
+def _backbone_pose_cache_identity(
+    polymer: str,
+    representation: str,
+    coords: np.ndarray,
+    heavy_label_to_idx: dict[str, int],
+    helix_spec: HelixSpec,
+) -> tuple[str, dict[str, object]]:
+    coords_array = np.asarray(coords, dtype=np.float64)
+    identity = {
+        "schema_version": _BACKBONE_POSE_CACHE_SCHEMA_VERSION,
+        "kind": "backbone_pose",
+        "polymer": str(polymer),
+        "representation": str(representation),
+        "theta_rad": float(helix_spec.theta_rad),
+        "rise_A": float(helix_spec.rise_A),
+        "coords_sha256": hashlib.sha256(coords_array.tobytes()).hexdigest(),
+        "heavy_label_to_idx": {
+            str(label): int(idx)
+            for label, idx in sorted(heavy_label_to_idx.items())
+        },
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:24], identity
+
+
+def _backbone_pose_cache_entry(
+    polymer: str,
+    representation: str,
+    coords: np.ndarray,
+    heavy_label_to_idx: dict[str, int],
+    helix_spec: HelixSpec,
+) -> tuple[Path, dict[str, object]]:
+    key, identity = _backbone_pose_cache_identity(
+        polymer=polymer,
+        representation=representation,
+        coords=coords,
+        heavy_label_to_idx=heavy_label_to_idx,
+        helix_spec=helix_spec,
+    )
+    return (
+        _BACKBONE_POSE_CACHE_DIR
+        / str(polymer).lower()
+        / str(representation).lower()
+        / key
+        / "pose.json",
+        identity,
+    )
+
+
+def _load_disk_cached_backbone_pose(
+    polymer: str,
+    representation: str,
+    coords: np.ndarray,
+    heavy_label_to_idx: dict[str, int],
+    helix_spec: HelixSpec,
+) -> BackbonePose | None:
+    payload_path, expected_identity = _backbone_pose_cache_entry(
+        polymer=polymer,
+        representation=representation,
+        coords=coords,
+        heavy_label_to_idx=heavy_label_to_idx,
+        helix_spec=helix_spec,
+    )
+    if not payload_path.exists():
+        return None
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("identity") != expected_identity:
+        return None
+    pose_payload = payload.get("pose")
+    if not isinstance(pose_payload, dict):
+        return None
+    try:
+        return BackbonePose(
+            radius_A=float(pose_payload["radius_A"]),
+            tilt_x_rad=float(pose_payload["tilt_x_rad"]),
+            tilt_y_rad=float(pose_payload["tilt_y_rad"]),
+            phase_z_rad=float(pose_payload["phase_z_rad"]),
+            flip_ring_normal=bool(pose_payload["flip_ring_normal"]),
+        )
+    except Exception:
+        return None
+
+
+def _store_disk_cached_backbone_pose(
+    polymer: str,
+    representation: str,
+    coords: np.ndarray,
+    heavy_label_to_idx: dict[str, int],
+    helix_spec: HelixSpec,
+    pose: BackbonePose,
+) -> None:
+    payload_path, identity = _backbone_pose_cache_entry(
+        polymer=polymer,
+        representation=representation,
+        coords=coords,
+        heavy_label_to_idx=heavy_label_to_idx,
+        helix_spec=helix_spec,
+    )
+    payload = {
+        "identity": identity,
+        "pose": {
+            "radius_A": float(pose.radius_A),
+            "tilt_x_rad": float(pose.tilt_x_rad),
+            "tilt_y_rad": float(pose.tilt_y_rad),
+            "phase_z_rad": float(pose.phase_z_rad),
+            "flip_ring_normal": bool(pose.flip_ring_normal),
+        },
+    }
+    try:
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        return
+
+
 def _fit_backbone_pose(
     polymer: str,
     representation: str,
@@ -641,6 +770,17 @@ def _fit_backbone_pose(
     if cached is not None:
         return cached
 
+    disk_cached = _load_disk_cached_backbone_pose(
+        polymer=polymer,
+        representation=representation,
+        coords=coords,
+        heavy_label_to_idx=heavy_label_to_idx,
+        helix_spec=helix_spec,
+    )
+    if disk_cached is not None:
+        _BACKBONE_POSE_CACHE[cache_key] = disk_cached
+        return disk_cached
+
     if abs(float(helix_spec.theta_rad)) < 1e-10 and abs(float(helix_spec.rise_A)) < 1e-10:
         neutral = BackbonePose(
             radius_A=0.0,
@@ -650,6 +790,14 @@ def _fit_backbone_pose(
             flip_ring_normal=False,
         )
         _BACKBONE_POSE_CACHE[cache_key] = neutral
+        _store_disk_cached_backbone_pose(
+            polymer=polymer,
+            representation=representation,
+            coords=coords,
+            heavy_label_to_idx=heavy_label_to_idx,
+            helix_spec=helix_spec,
+            pose=neutral,
+        )
         return neutral
 
     screw = ScrewTransform(theta_rad=helix_spec.theta_rad, rise_A=helix_spec.rise_A)
@@ -686,6 +834,14 @@ def _fit_backbone_pose(
             "Helix parameters are incompatible with a chemically plausible glycosidic bond."
         )
     _BACKBONE_POSE_CACHE[cache_key] = best_pose
+    _store_disk_cached_backbone_pose(
+        polymer=polymer,
+        representation=representation,
+        coords=coords,
+        heavy_label_to_idx=heavy_label_to_idx,
+        helix_spec=helix_spec,
+        pose=best_pose,
+    )
     return best_pose
 
 

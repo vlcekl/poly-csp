@@ -48,7 +48,7 @@ def _set_polymer_metadata(
     mol.SetProp("_poly_csp_removed_old_indices_json", json.dumps(removed_sorted))
     mol.SetProp("_poly_csp_residue_label_map_json", json.dumps(residue_label_map))
 
-    # Backward-compatible quick local indices for fixed-site labels.
+    # Cached local indices for fixed-site labels used by attachment helpers.
     for name, idx in template.site_idx.items():
         mol.SetIntProp(f"_poly_csp_siteidx_{name}", int(idx))
 
