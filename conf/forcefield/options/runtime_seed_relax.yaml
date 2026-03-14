@@ -7,6 +7,7 @@ defaults:
 forcefield:
   options:
     hbond_k: 0.0
+    dihedral_l: 0.0
 
     # Seed-mode soft finalization is intentionally incompatible with annealing.
     anneal:

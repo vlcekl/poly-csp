@@ -4,6 +4,4 @@ defaults:
   - override /seed_bias: solvent_ready
   - _self_
 
-ordering: {}
-
-soft_max_iterations: 80
+ordering: {} 
